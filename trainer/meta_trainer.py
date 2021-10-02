@@ -28,6 +28,25 @@ import tqdm
 import time
 import importlib
 
+def loadDict(path,model,attention,nb_vec):
+
+    sd = torch.load(path)['params']
+
+    if attention != "none":
+        for key in sd:
+            if key.find("base_learner.fc1_w") != -1 or key.find("base_learner.vars") != -1:
+                if sd[key].shape != model.state_dict()[key].shape:
+                    sd[key] = sd[key].repeat(1,nb_vec)
+            elif key.find("hyperprior_combination_model.fc_w") != -1 or key.find("hyperprior_combination_model.hyperprior_mapping_vars.0") != -1:
+                if sd[key].shape != model.state_dict()[key].shape:
+                    sd[key] = sd[key].repeat(1,nb_vec)   
+            elif key.find("hyperprior_basestep_model.fc_w") != -1 or key.find("hyperprior_basestep_model.hyperprior_mapping_vars.0") != -1:
+                if sd[key].shape != model.state_dict()[key].shape:
+                    sd[key] = sd[key].repeat(1,nb_vec)   
+
+    model.load_state_dict(sd)
+    return model
+
 class MetaTrainer(object):
     def __init__(self, args):
         self.args = args
@@ -76,7 +95,11 @@ class MetaTrainer(object):
             pretrained_dict = {'encoder.' + k: v for k, v in pretrained_dict.items()}
             for k,v in pretrained_dict.items():
                 model_dict[k]=pretrained_dict[k]
-            self.model.load_state_dict(model_dict)
+            try:
+                self.model.load_state_dict(model_dict,strict=False)
+            except RuntimeError:
+                #self.model.load_state_dict(torch.load(args.dir)['params'],strict=False)
+                self.model = loadDict(torch.load(args.dir),self.model,self.args.attention,self.args.nb_vec)
 
         if self.args.num_gpu>1:
             self.model = nn.DataParallel(self.model,list(range(args.num_gpu)))     
@@ -248,13 +271,17 @@ class MetaTrainer(object):
         model = self.model
         args = self.args
         result_list=[args.save_path]
-        trlog = torch.load(osp.join(args.save_path, 'trlog'))
+        if not os.path.exists(osp.join(args.save_path, 'trlog')):
+            trlog = {}
+            trlog['args'] = vars(args)
+        else:
+            trlog = torch.load(osp.join(args.save_path, 'trlog'))
         test_set = self.Dataset('test', args)
         sampler = CategoriesSampler(test_set.label, 3000, args.way, args.shot + args.query)
         loader = DataLoader(test_set, batch_sampler=sampler, num_workers=args.num_workers, pin_memory=True)
         test_acc_record = np.zeros((3000,))
 
-        model.load_state_dict(torch.load(osp.join(args.save_path, 'max_acc' + '.pth'))['params'])
+        model = loadDict(osp.join(args.save_path, 'max_acc' + '.pth'),model,self.args.attention,self.args.nb_vec)
         model.eval()
 
         ave_acc = Averager()
@@ -280,6 +307,11 @@ class MetaTrainer(object):
             tqdm_gen.set_description('Episode {}: {:.2f}({:.2f})'.format(i, ave_acc.item() * 100, acc * 100))
 
         m, pm = compute_confidence_interval(test_acc_record)
+
+        if not 'max_acc_epoch' in trlog:
+            trlog['max_acc_epoch'] = -1
+        if not "max_acc" in trlog:
+            trlog["max_acc"] = -1
 
         result_list.append('Best validation epoch {},\nbest validation acc {:.4f}, \nbest test acc {:.4f}'.format(trlog['max_acc_epoch'], trlog['max_acc'], ave_acc.item()))
         result_list.append('Test acc {:.4f} + {:.4f}'.format(m, pm))
@@ -405,3 +437,4 @@ class MetaTrainer(object):
         writer.close()
         result_list=['Best validation epoch {},\nbest val Acc {:.4f}'.format(trlog['max_acc_epoch'], trlog['max_acc'],)]
         save_list_to_txt(os.path.join(args.save_path,'results.txt'),result_list)
+

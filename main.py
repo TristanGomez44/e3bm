@@ -66,6 +66,8 @@ parser.add_argument('-gpu', default='0')
 parser.add_argument('-gpu_occupy',action='store_true')
 parser.add_argument('-seed', type=int, default=0)
 parser.add_argument('-num_workers', type=int, default=8)
+parser.add_argument('-attention',type=str,default='none')
+parser.add_argument('-nb_vec',type=int,default=3)
 
 args = parser.parse_args()
 pprint(vars(args))

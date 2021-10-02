@@ -21,7 +21,7 @@ class BaseLearner(nn.Module):
     def __init__(self, args, z_dim):
         super().__init__()
         self.args = args
-        self.z_dim = z_dim
+        self.z_dim = z_dim*(args.nb_vec if args.attention != "none" else 1)
         self.vars = nn.ParameterList()
         self.fc1_w = nn.Parameter(torch.ones([self.args.way, self.z_dim]))
         torch.nn.init.kaiming_normal_(self.fc1_w)
@@ -51,7 +51,8 @@ class HyperpriorCombination(nn.Module):
                 self.hyperprior_initialization_vars.append(nn.Parameter(torch.FloatTensor([1.0/update_step])))
 
         self.hyperprior_mapping_vars = nn.ParameterList()
-        self.fc_w = nn.Parameter(torch.ones([update_step, z_dim*2]))
+        mult = args.nb_vec if args.attention != "none" else 1
+        self.fc_w = nn.Parameter(torch.ones([update_step, z_dim*2*mult]))
         torch.nn.init.kaiming_normal_(self.fc_w)
         self.hyperprior_mapping_vars.append(self.fc_w)
         self.fc_b = nn.Parameter(torch.zeros(update_step))
@@ -82,7 +83,8 @@ class HyperpriorBasestep(nn.Module):
             self.hyperprior_initialization_vars.append(nn.Parameter(torch.FloatTensor([update_lr])))
 
         self.hyperprior_mapping_vars = nn.ParameterList()
-        self.fc_w = nn.Parameter(torch.ones([update_step, z_dim*2]))
+        mult = args.nb_vec if args.attention != "none" else 1
+        self.fc_w = nn.Parameter(torch.ones([update_step, z_dim*2*mult]))
         torch.nn.init.kaiming_normal_(self.fc_w)
         self.hyperprior_mapping_vars.append(self.fc_w)
         self.fc_b = nn.Parameter(torch.zeros(update_step))
@@ -135,7 +137,7 @@ class MetaModel(nn.Module):
                     from model.resnet12_mtl import ResNet
                 else:
                     from model.resnet12 import ResNet
-            self.encoder = ResNet()
+            self.encoder = ResNet(attention=self.args.attention,nb_vec=self.args.nb_vec)
             self.z_dim = 640
         elif self.args.backbone == 'wrn':
             if self.mode == 'pre':
