@@ -12,7 +12,7 @@
 #   permissions and limitations under the License.
 # ==============================================================================
 
-import argparse
+import argparse,os
 import os.path as osp
 import numpy as np
 import torch
@@ -27,6 +27,35 @@ import tqdm
 import time
 import importlib
 from trainer.meta_trainer import MetaTrainer
+import optuna,sqlite3
+
+def run(args,trial=None):
+
+    if args.optuna:
+        args.lr = trial.suggest_float("lr",0.0005, 0.05, log=True)
+        args.temperature = trial.suggest_float("temperature",4, 12, step=4)
+        args.step_size = trial.suggest_int("step_size",5,20,step=5)
+        args.gamma = trial.suggest_float("gamma",0.3, 0.7, step=0.2)
+        args.dropout = trial.suggest_float("dropout",0.3, 0.7, step=0.2)
+        args.base_lr = trial.suggest_float("base_lr",0.01, 0.5, log=True)
+        if args.dist:
+            args.kl_temp = trial.suggest_float("kl_temp", 1, 21, step=5)
+            args.kl_interp = trial.suggest_float("kl_interp", 0.1, 1, step=0.1)
+
+    trainer = MetaTrainer(args)
+    if args.mode == 'meta_train':
+        print('Start meta-train phase.')
+        trainer.train()
+        print('Start meta-test phase.')
+        value = trainer.eval()
+    elif args.mode == 'meta_eval':
+        print('Start meta-test phase.')
+        value = trainer.eval()
+    elif args.mode == 'pre_train':
+        print('Start pre-train phase.')
+        trainer.pre_train()
+
+    return value 
 
 parser = argparse.ArgumentParser()
 
@@ -68,9 +97,15 @@ parser.add_argument('-seed', type=int, default=0)
 parser.add_argument('-num_workers', type=int, default=8)
 parser.add_argument('-attention',type=str,default='none')
 parser.add_argument('-nb_vec',type=int,default=3)
+parser.add_argument('-dist',action="store_true")
+parser.add_argument('-optuna',action="store_true")
+parser.add_argument('-optuna_trial_nb',type=int,default=20)
+
+parser.add_argument('-model_id',type=str,default='default')
+parser.add_argument('-exp_id',type=str,default='default')
 
 args = parser.parse_args()
-pprint(vars(args))
+print(vars(args))
 
 if args.seed==0:
     print ('Random mode.')
@@ -92,15 +127,38 @@ if args.gpu_occupy:
     occupy_memory(args.gpu)
     print('Occupy GPU memory in advance.')
 
-trainer = MetaTrainer(args)
-if args.mode == 'meta_train':
-    print('Start meta-train phase.')
-    trainer.train()
-    print('Start meta-test phase.')
-    trainer.eval()
-elif args.mode == 'meta_eval':
-    print('Start meta-test phase.')
-    trainer.eval()
-elif args.mode == 'pre_train':
-    print('Start pre-train phase.')
-    trainer.pre_train()
+if args.optuna:
+    
+    if not os.path.exists("results"):
+        os.makedirs("results")
+    if not os.path.exists("results/{}/".format(args.exp_id)):
+        os.makedirs("results/{}/".format(args.exp_id))
+
+    def objective(trial):
+        return run(args,trial=trial)
+
+    study = optuna.create_study(direction="maximize",\
+                                storage="sqlite:///./results/{}/{}_hypSearch.db".format(args.exp_id,args.model_id), \
+                                study_name=args.model_id,load_if_exists=True)
+
+    con = sqlite3.connect("./results/{}/{}_hypSearch.db".format(args.exp_id,args.model_id))
+    curr = con.cursor()
+
+    failedTrials = 0
+    for elem in curr.execute('SELECT trial_id,value FROM trials WHERE study_id == 1').fetchall():
+        if elem[1] is None:
+            failedTrials += 1
+
+    trialsAlreadyDone = len(curr.execute('SELECT trial_id,value FROM trials WHERE study_id == 1').fetchall())
+
+    if trialsAlreadyDone-failedTrials < args.optuna_trial_nb:
+
+        studyDone = False
+        while not studyDone:
+            print("N trials left",args.optuna_trial_nb-trialsAlreadyDone+failedTrials)
+            study.optimize(objective,n_trials=args.optuna_trial_nb-trialsAlreadyDone+failedTrials)
+            studyDone = True
+
+else:
+    run(args)
+    

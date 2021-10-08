@@ -32,9 +32,9 @@ def loadDict(path,model,attention,nb_vec):
 
     sd = torch.load(path)['params']
 
-    if attention != "none":
+    if attention == "br_npa" or attention == "bcnn":
         for key in sd:
-            if key.find("base_learner.fc1_w") != -1 or key.find("base_learner.vars") != -1:
+            if key.find("base_learner.fc1_w") != -1 or key.find("base_learner.vars.0") != -1:
                 if sd[key].shape != model.state_dict()[key].shape:
                     sd[key] = sd[key].repeat(1,nb_vec)
             elif key.find("hyperprior_combination_model.fc_w") != -1 or key.find("hyperprior_combination_model.hyperprior_mapping_vars.0") != -1:
@@ -44,8 +44,39 @@ def loadDict(path,model,attention,nb_vec):
                 if sd[key].shape != model.state_dict()[key].shape:
                     sd[key] = sd[key].repeat(1,nb_vec)   
 
-    model.load_state_dict(sd)
+    miss,unexp = model.load_state_dict(sd,strict=False)
+
+    if attention == "cross":
+        expToMiss = []
+        actuallyMissing = []
+        for key in miss:
+            if key.find("base_learner.conv") != -1 or key.find("base_learner.vars") != -1:
+                expToMiss.append(key)
+            else:
+                actuallyMissing.append(key)
+
+        print("Missing",actuallyMissing,"but that is expected")
+
+        if len(actuallyMissing) > 0:
+            raise ValueError("Missing",actuallyMissing)
+    else:
+        if len(miss) > 0:
+            raise ValueError("Missing keys",miss)
+
+    if len(unexp) > 0:
+        raise ValueError("Unexpected keys",unexp)
+
     return model
+
+class DataParallelModel(nn.DataParallel):
+    def __init__(self, model):
+        super().__init__(model)
+
+    def __getattr__(self, name):
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            return getattr(self.module, name)
 
 class MetaTrainer(object):
     def __init__(self, args):
@@ -78,10 +109,10 @@ class MetaTrainer(object):
 
         if args.mode == 'pre_train':
             print('Building pre-train model.')
-            self.model = importlib.import_module('model.meta_model').MetaModel(args, dropout=args.dropout, mode='pre')
+            self.model = importlib.import_module('model.meta_model').MetaModel(args, dropout=args.dropout, mode='pre',highRes=args.dist)
         else:
             print('Building meta model.')
-            self.model = importlib.import_module('model.meta_model').MetaModel(args, dropout=args.dropout, mode='meta')
+            self.model = importlib.import_module('model.meta_model').MetaModel(args, dropout=args.dropout, mode='meta',highRes=args.dist)
 
         if args.mode == 'pre_train':
             print ('Initialize the model for pre-train phase.')
@@ -91,19 +122,33 @@ class MetaTrainer(object):
                 os.system('sh scripts/download_pretrain_model.sh')
             print ('Loading pre-trainrd model from:\n',args.dir)
             model_dict = self.model.state_dict()
-            pretrained_dict = torch.load(args.dir)['params']
+            pretrained_dict = torch.load(args.dir,map_location="cuda" if torch.cuda.is_available() else "cpu")['params']
             pretrained_dict = {'encoder.' + k: v for k, v in pretrained_dict.items()}
             for k,v in pretrained_dict.items():
                 model_dict[k]=pretrained_dict[k]
-            try:
-                self.model.load_state_dict(model_dict,strict=False)
-            except RuntimeError:
+            
+            miss,unexp = self.model.load_state_dict(model_dict,strict=False)
+            if len(miss) > 0 or len(unexp) > 0:
                 #self.model.load_state_dict(torch.load(args.dir)['params'],strict=False)
-                self.model = loadDict(torch.load(args.dir),self.model,self.args.attention,self.args.nb_vec)
+                print("DIR",args.dir)
+                self.model = loadDict(args.dir,self.model,self.args.attention,self.args.nb_vec)
 
-        if self.args.num_gpu>1:
-            self.model = nn.DataParallel(self.model,list(range(args.num_gpu)))     
-        self.model=self.model.cuda()
+            if self.args.num_gpu>1:
+                self.model = DataParallelModel(self.model)     
+            self.model=self.model.cuda() if torch.cuda.is_available() else self.model
+
+            if args.dist:
+                oldAtt = args.attention
+                args.attention = "none"
+                self.teach_model = importlib.import_module('model.meta_model').MetaModel(args, dropout=args.dropout, mode='meta')
+                self.teach_model = loadDict(args.dir,self.teach_model,self.args.attention,self.args.nb_vec)
+                args.attention = oldAtt
+                self.teach_model.eval()
+        
+                if self.args.num_gpu>1:
+                    self.teach_model = DataParallelModel(self.teach_model)     
+                self.teach_model=self.teach_model.cuda() if torch.cuda.is_available() else self.teach_model
+
         print('Building model finished.')
 
         if args.mode == 'pre_train':
@@ -152,7 +197,16 @@ class MetaTrainer(object):
             self.lr_scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=args.step_size, gamma=args.gamma)
 
     def save_model(self, name):
+
+        name = '{}_{}'.format(name,self.args.model_id) if self.args.optuna else name
+
         torch.save(dict(params=self.model.state_dict()), osp.join(self.args.save_path, name + '.pth'))
+
+    def crossAttLoss(self,ytest,cls_scores,labels_test,pids):
+        loss1 = self.criterion(ytest, pids.view(-1))
+        loss2 = self.criterion(cls_scores, labels_test.view(-1))
+        loss = loss1 + 0.5 * loss2
+        return loss
 
     def train(self):
         args = self.args
@@ -173,6 +227,13 @@ class MetaTrainer(object):
         label = label.type(torch.LongTensor)
         if torch.cuda.is_available():
             label = label.cuda()
+
+        # Generate the labels for train set of the episodes
+        label_shot = torch.arange(self.args.way).repeat(self.args.shot)
+        if torch.cuda.is_available():
+            label_shot = label_shot.type(torch.cuda.LongTensor)
+        else:
+            label_shot = label_shot.type(torch.LongTensor)
 
         SLEEP(args)
 
@@ -195,9 +256,22 @@ class MetaTrainer(object):
                 p = args.shot * args.way 
                 data_shot, data_query = data[:p], data[p:] 
                 data_shot = data_shot.unsqueeze(0).repeat(args.num_gpu, 1, 1, 1, 1)
-                logits = model((data_shot, data_query)) 
+                
+                if args.attention == "cross":
+                    label_one_hot = self.one_hot(label).to(label.device)
+                    label_shot_one_hot = self.one_hot(label_shot).to(label.device)
+                    ytest,cls_scores,logits = self.model((data_shot, data_query))
+                    pids = label_shot
+                    loss = self.crossAttLoss(ytest,cls_scores,label,pids)
+                    logits = logits[0]
+                else:
+                    logits = model((data_shot, data_query)) 
+                    loss = F.cross_entropy(logits, label)
 
-                loss = F.cross_entropy(logits, label)
+                if args.dist:
+                    logits_teach = model((data_shot,data_query))
+                    kl = F.kl_div(F.log_softmax(logits/args.kl_temp, dim=1),F.softmax(logits_teach/args.kl_temp, dim=1),reduction="batchmean")
+                    loss = kl*args.kl_interp*args.kl_temp*args.kl_temp+loss*(1-args.kl_interp)
 
                 acc = count_acc(logits, label)
                 writer.add_scalar('data/loss', float(loss), global_count)
@@ -218,52 +292,62 @@ class MetaTrainer(object):
 
             tl = tl.item()
             ta = ta.item()
-            vl = Averager()
-            va = Averager()
 
-            model.eval()
+            if epoch % 5 == 0:
+                model.eval() 
 
-            tqdm_gen = tqdm.tqdm(self.val_loader)
-            for i, batch in enumerate(tqdm_gen, 1):
-                if torch.cuda.is_available():
-                    data, _ = [_.cuda() for _ in batch]
-                else:
-                    data = batch[0]
-                p = args.shot * args.way
-                data_shot, data_query = data[:p], data[p:]
-                data_shot = data_shot.unsqueeze(0).repeat(args.num_gpu, 1, 1, 1, 1)
-                logits = model((data_shot, data_query))
-                loss = F.cross_entropy(logits, label)
-                acc = count_acc(logits, label)
+                vl = Averager()
+                va = Averager()
 
-                vl.add(loss.item())
-                va.add(acc)
-                tqdm_gen.set_description('Episode {}: {:.2f}({:.2f})'.format(i, va.item() * 100, acc * 100))
+                tqdm_gen = tqdm.tqdm(self.val_loader)
+                for i, batch in enumerate(tqdm_gen, 1):
+                    if torch.cuda.is_available():
+                        data, _ = [_.cuda() for _ in batch]
+                    else:
+                        data = batch[0]
+                    p = args.shot * args.way
+                    data_shot, data_query = data[:p], data[p:]
+                    data_shot = data_shot.unsqueeze(0).repeat(args.num_gpu, 1, 1, 1, 1)
+                    logits = model((data_shot, data_query))
+                    loss = F.cross_entropy(logits, label)
+                    acc = count_acc(logits, label)
 
-            vl = vl.item()
-            va = va.item()
-            writer.add_scalar('data/val_loss', float(vl), epoch)
-            writer.add_scalar('data/val_acc', float(va), epoch)
+                    vl.add(loss.item())
+                    va.add(acc)
+                    tqdm_gen.set_description('Episode {}: {:.2f}({:.2f})'.format(i, va.item() * 100, acc * 100))
 
-            print ('Validation acc:%.4f'%va)
-            if va >= trlog['max_acc']:
-                print ('********* New best model!!! *********')
-                trlog['max_acc'] = va
-                trlog['max_acc_epoch'] = epoch
-                self.save_model('max_acc')
+                vl = vl.item()
+                va = va.item()
+                writer.add_scalar('data/val_loss', float(vl), epoch)
+                writer.add_scalar('data/val_acc', float(va), epoch)
+
+                print ('Validation acc:%.4f'%va)
+                if va >= trlog['max_acc']:
+                    print ('********* New best model!!! *********')
+                    trlog['max_acc'] = va
+                    trlog['max_acc_epoch'] = epoch
+                    self.save_model("max_acc")
+
+                trlog['val_loss'].append(vl)
+                trlog['val_acc'].append(va)
+
+                print('Best epoch {}, best val acc={:.4f}.'.format(trlog['max_acc_epoch'], trlog['max_acc']))
 
             trlog['train_loss'].append(tl)
             trlog['train_acc'].append(ta)
-            trlog['val_loss'].append(vl)
-            trlog['val_acc'].append(va)
 
-            torch.save(trlog, osp.join(args.save_path, 'trlog'))
+            if args.dist:
+                suff = "_{}".format(args.model_id)
+            else:
+                suff = ""
+
+            torch.save(trlog, osp.join(args.save_path, 'trlog'+suff))
             if args.save_all:
                 self.save_model('epoch-%d'%epoch)
                 torch.save(self.optimizer.state_dict(), osp.join(args.save_path,'optimizer_latest.pth'))
-            print('Best epoch {}, best val acc={:.4f}.'.format(trlog['max_acc_epoch'], trlog['max_acc']))
-            print ('This epoch takes %d seconds.'%(time.time()-start_time),'\nStill need %.2f hour to finish.'%((time.time()-start_time)*(args.max_epoch-epoch)/3600))
-            self.lr_scheduler.step()
+            if epoch % 5 == 0:
+                print ('This epoch takes %d seconds.'%(time.time()-start_time),'\nStill need %.2f hour to finish.'%((time.time()-start_time)*(args.max_epoch-epoch)/3600))
+                self.lr_scheduler.step()
 
         writer.close()
 
@@ -271,17 +355,29 @@ class MetaTrainer(object):
         model = self.model
         args = self.args
         result_list=[args.save_path]
-        if not os.path.exists(osp.join(args.save_path, 'trlog')):
+
+        if args.optuna:
+            suff = "_{}".format(args.model_id)
+        else:
+            suff = ""
+
+        if not os.path.exists(osp.join(args.save_path, 'trlog'+suff)):
             trlog = {}
             trlog['args'] = vars(args)
         else:
-            trlog = torch.load(osp.join(args.save_path, 'trlog'))
+            trlog = torch.load(osp.join(args.save_path, 'trlog'+suff))
         test_set = self.Dataset('test', args)
         sampler = CategoriesSampler(test_set.label, 3000, args.way, args.shot + args.query)
         loader = DataLoader(test_set, batch_sampler=sampler, num_workers=args.num_workers, pin_memory=True)
         test_acc_record = np.zeros((3000,))
 
-        model = loadDict(osp.join(args.save_path, 'max_acc' + '.pth'),model,self.args.attention,self.args.nb_vec)
+        if self.args.optuna:
+            name = "max_acc_{}".format(self.args.model_id)
+        else:
+            name = "max_acc"
+
+        print(osp.join(args.save_path, name + '.pth'))
+        model = loadDict(osp.join(args.save_path, name + '.pth'),model,self.args.attention,self.args.nb_vec)
         model.eval()
 
         ave_acc = Averager()
@@ -318,6 +414,19 @@ class MetaTrainer(object):
         print (result_list[-2])
         print (result_list[-1])
         save_list_to_txt(os.path.join(args.save_path,'results.txt'),result_list)
+
+        if not os.path.exists("results/{}".format(args.exp_id)):
+            os.makedirs("results/{}".format(args.exp_id))
+        
+        writeHeader = not os.path.exists("results/{}/{}.csv".format(args.exp_id,args.model_id)) 
+      
+        with open("results/{}/{}.csv".format(args.exp_id,args.model_id),"a") as file:
+            if writeHeader:
+                print("model_id,m,pm",file=file)
+
+            print("{},{},{}".format(args.model_id,m,pm),file=file)
+
+        return m
 
     def pre_train(self):
         model = self.model
