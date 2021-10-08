@@ -12,27 +12,188 @@
 #   permissions and limitations under the License.
 # ==============================================================================
 
+from numpy.lib.shape_base import vsplit
 import  torch
 import torch.nn as nn
 from utils.misc import euclidean_metric
 import torch.nn.functional as F
+from model.conv2d_mtl import Conv2dMtl
+import math 
+import sys
 
+
+def conv3x3(in_planes, out_planes, stride=1):
+    """3x3 convolution with padding"""
+    return Conv2dMtl(in_planes, out_planes, kernel_size=3, stride=stride,
+                     padding=1, bias=False)
+
+def conv3x3_reg(in_planes, out_planes, stride=1):
+    return nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride,
+                     padding=1, bias=True)
+
+def conv1x1(in_planes, out_planes, stride=1):
+    return nn.Conv2d(in_planes, out_planes, kernel_size=1, stride=stride,
+                     padding=0, bias=False)
+
+class BasicBlock(nn.Module):
+    expansion = 1
+
+    def __init__(self, inplanes, planes, stride=1):
+        super(BasicBlock, self).__init__()
+        self.conv1 = conv3x3(inplanes, planes)
+        self.bn1 = nn.BatchNorm2d(planes)
+        self.relu = nn.LeakyReLU(0.1)
+        self.conv2 = conv3x3(planes, planes)
+        self.bn2 = nn.BatchNorm2d(planes)
+        self.conv3 = conv3x3(planes, planes)
+        self.bn3 = nn.BatchNorm2d(planes)
+        self.maxpool = nn.MaxPool2d(stride)
+
+        self.stride = stride
+
+    def forward(self, x):
+
+        residual = x
+
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+        out = self.relu(out)
+
+        out = self.conv3(out)
+        out = self.bn3(out)
+
+        out += residual
+        out = self.relu(out)
+        out = self.maxpool(out)
+
+        return out
+    
 class BaseLearner(nn.Module):
-    def __init__(self, args, z_dim):
+    def __init__(self, args, z_dim,attention="none",nb_vec=3):
         super().__init__()
         self.args = args
-        self.z_dim = z_dim*(args.nb_vec if args.attention != "none" else 1)
+        self.z_dim = z_dim*(args.nb_vec if args.attention=="br_npa" or args.attention=="bcnn" else 1)
         self.vars = nn.ParameterList()
         self.fc1_w = nn.Parameter(torch.ones([self.args.way, self.z_dim]))
         torch.nn.init.kaiming_normal_(self.fc1_w)
         self.vars.append(self.fc1_w)
 
-    def forward(self, input_x, the_vars=None):
+        cfg = [64,160, 320, 640]
+        self.cfg = cfg
+
+        self.nbVec = nb_vec
+        self.attention = attention
+        if self.attention == "bcnn":
+            attention = []
+            attention.append(conv3x3_reg(cfg[-1], self.nbVec))
+            attention.append(nn.ReLU())
+            self.att = nn.Sequential(*attention)
+            self.vars.extend(list(self.att.parameters()))
+
+            self.avgpool = nn.AdaptiveAvgPool2d(1)
+        elif self.attention == "cross":
+            self.conv1 = nn.Conv2d(25, 5, 1)
+            self.conv2 = nn.Conv2d(5, 25, 1, stride=1, padding=0)
+            
+            self.vars.extend(list(self.conv1.parameters()))
+            self.vars.extend(list(self.conv2.parameters()))
+
+    def compAtt(self,x,the_vars=None,retMaps=False):
+
         if the_vars is None:
             the_vars = self.vars
+
+        weight,bias = the_vars[1:]
+        attMaps = F.relu(F.conv2d(x,weight,bias,padding=1))
+        
+        x = (attMaps.unsqueeze(2)*x.unsqueeze(1)).reshape(x.size(0),x.size(1)*(attMaps.size(1)),x.size(2),x.size(3))
+        x = self.avgpool(x)
+        return x.view(x.size(0), -1),attMaps
+
+    def get_attention(self, a,quer=True,the_vars=None):
+        input_a = a
+
+        if the_vars is None:
+            the_vars = self.vars
+
+        w1,b1,w2,b2 = the_vars[1:]
+
+        a = a.mean(3) 
+        a = a.transpose(1, 3) 
+        a = F.relu(F.conv2d(a,w1,b1))
+        a = F.conv2d(a,w2,b2) 
+        a = a.transpose(1, 3)
+        a = a.unsqueeze(3) 
+        
+        a = torch.mean(input_a * a, -1) 
+        
+        if quer:
+            att_weights = torch.softmax(a.mean(dim=-1,keepdim=True),dim=1).unsqueeze(-1)
+        else:
+            att_weights = torch.softmax(a.mean(dim=-1,keepdim=True),dim=2).unsqueeze(-1)
+
+        a = F.softmax(a / 0.025, dim=-1) + 1
+
+        return a,att_weights
+
+    def poolFeat(self,input_x,attMap=None,quer=None,the_vars=None,retMaps=False):
+        if self.attention == "bcnn":
+            input_x,attMaps = self.compAtt(input_x,the_vars,retMaps=retMaps)
+
+            if retMaps:
+                norm = torch.sqrt(torch.pow(input_x,2).sum(dim=3))
+
+        elif self.attention == "cross":
+            attMapShapeBef = attMap.shape
+            attMap,att_weights = self.get_attention(attMap,the_vars=the_vars)
+
+            if quer:
+                size = input_x.shape[-1]
+                input_x = input_x.view(self.args.way,self.args.query,self.cfg[-1],size*size)
+                input_x = input_x.unsqueeze(1) * attMap.unsqueeze(3)
+                input_x = (input_x * att_weights).sum(dim=1)
+                input_x = input_x.view(self.args.way*self.args.query,self.cfg[-1],size,size)
+            else:
+                size = input_x.shape[-2]
+                input_x = input_x.view(self.args.way,self.args.shot,size*size,self.cfg[-1])
+                input_x = input_x.unsqueeze(2).permute(0,1,2,4,3) * attMap.unsqueeze(3)
+                input_x = (input_x * att_weights).sum(dim=2)
+              
+                input_x = input_x.view(self.args.way*self.args.shot,self.cfg[-1],size,size)
+
+            print(attMap.shape,att_weights.shape,input_x.shape)
+            
+            if retMaps:
+                attMaps = (attMap*att_weights).sum(dim=2)
+                norm = torch.sqrt(torch.pow(input_x,2).sum(dim=3))
+
+            input_x=F.adaptive_avg_pool2d(input_x,1).squeeze(-1).squeeze(-1)
+
+        if retMaps:
+            return input_x,attMaps,norm
+        else:
+            return input_x
+
+    def forward(self, input_x, the_vars=None,attMap=None,quer=True,retMaps=False):
+
+        if the_vars is None:
+            the_vars = self.vars
+
+        ret = self.poolFeat(input_x,attMap,quer,the_vars,retMaps=retMaps)
+        input_x = ret[0]
+
         fc1_w = the_vars[0]
+
         net = F.linear(F.normalize(input_x, p=2, dim=1), F.normalize(fc1_w, p=2, dim=1))
-        return net
+        
+        if retMaps:
+            return net,ret[1],ret[2]
+        else:
+            return net
 
     def parameters(self):
         return self.vars
@@ -51,7 +212,7 @@ class HyperpriorCombination(nn.Module):
                 self.hyperprior_initialization_vars.append(nn.Parameter(torch.FloatTensor([1.0/update_step])))
 
         self.hyperprior_mapping_vars = nn.ParameterList()
-        mult = args.nb_vec if args.attention != "none" else 1
+        mult = args.nb_vec if args.attention == "br_npa" or args.attention == "bcnn" else 1
         self.fc_w = nn.Parameter(torch.ones([update_step, z_dim*2*mult]))
         torch.nn.init.kaiming_normal_(self.fc_w)
         self.hyperprior_mapping_vars.append(self.fc_w)
@@ -83,7 +244,7 @@ class HyperpriorBasestep(nn.Module):
             self.hyperprior_initialization_vars.append(nn.Parameter(torch.FloatTensor([update_lr])))
 
         self.hyperprior_mapping_vars = nn.ParameterList()
-        mult = args.nb_vec if args.attention != "none" else 1
+        mult = args.nb_vec if args.attention == "br_npa" or args.attention == "bcnn" else 1
         self.fc_w = nn.Parameter(torch.ones([update_step, z_dim*2*mult]))
         torch.nn.init.kaiming_normal_(self.fc_w)
         self.hyperprior_mapping_vars.append(self.fc_w)
@@ -108,13 +269,13 @@ class HyperpriorBasestep(nn.Module):
         return self.hyperprior_mapping_vars
 
 class MetaModel(nn.Module):
-    def __init__(self, args, dropout=0.2, mode='meta'):
+    def __init__(self, args, dropout=0.2, mode='meta',highRes=False):
         super().__init__()
         self.args = args
         self.mode = mode
 
-        self.init_backbone()
-        self.base_learner = BaseLearner(args, self.z_dim)
+        self.init_backbone(highRes)
+        self.base_learner = BaseLearner(args, self.z_dim,attention=self.args.attention,nb_vec=self.args.nb_vec)
         self.update_lr = self.args.base_lr
         self.update_step = self.args.base_epoch
 
@@ -128,7 +289,7 @@ class MetaModel(nn.Module):
             self.hyperprior_combination_model = HyperpriorCombination(args, self.update_step, self.z_dim)
             self.hyperprior_basestep_model = HyperpriorBasestep(args, self.update_step, self.update_lr, self.z_dim)
 
-    def init_backbone(self):
+    def init_backbone(self,highRes):
         if self.args.backbone == 'resnet12':
             if self.mode == 'pre':
                 from model.resnet12 import ResNet
@@ -137,7 +298,7 @@ class MetaModel(nn.Module):
                     from model.resnet12_mtl import ResNet
                 else:
                     from model.resnet12 import ResNet
-            self.encoder = ResNet(attention=self.args.attention,nb_vec=self.args.nb_vec)
+            self.encoder = ResNet(attention=self.args.attention,nb_vec=self.args.nb_vec,highRes=highRes)
             self.z_dim = 640
         elif self.args.backbone == 'wrn':
             if self.mode == 'pre':
@@ -155,12 +316,12 @@ class MetaModel(nn.Module):
         if self.mode == 'pre':
             self.fc = nn.Sequential(nn.Linear(self.z_dim, self.args.num_class))
 
-    def forward(self, inputs):
+    def forward(self, inputs,retMaps=False):
         if self.mode=='pre':
             return self.pretrain_forward(inputs)
         elif self.mode=='meta':
             data_shot, data_query = inputs
-            return self.meta_forward(data_shot, data_query)
+            return self.meta_forward(data_shot, data_query,retMaps=retMaps)
         else:
             raise ValueError('Please set the correct mode')
 
@@ -188,20 +349,65 @@ class MetaModel(nn.Module):
     def get_hyperprior_stepsize_mapping_vars(self):
         return self.hyperprior_basestep_model.get_hyperprior_mapping_vars()
 
-    def meta_forward(self, data_shot, data_query):
+    def cam(self, f1, f2):
+
+        f1 = f1.view(self.args.way,self.args.shot,f1.shape[1],f1.shape[2],f1.shape[3])
+        f2 = f2.view(self.args.way,self.args.query,f2.shape[1],f2.shape[2],f2.shape[3])
+      
+        b, n1, c, h, w = f1.size()
+        n2 = f2.size(1)
+
+        f1 = f1.view(b, n1, c, -1) 
+        f2 = f2.view(b, n2, c, -1)
+
+        f1_norm = F.normalize(f1, p=2, dim=2, eps=1e-12)
+        f2_norm = F.normalize(f2, p=2, dim=2, eps=1e-12)
+        
+        f1_norm = f1_norm.transpose(2, 3).unsqueeze(2) 
+        f2_norm = f2_norm.unsqueeze(1)
+
+        a1 = torch.matmul(f1_norm, f2_norm) 
+
+        a2 = a1.transpose(3, 4) 
+
+        f1 = f1.view(b*n1, c, h, w)
+        f2 = f2.view(b*n2, c, h, w)
+
+        return f1, f2,a1,a2
+
+    def meta_forward(self, data_shot, data_query,retMaps=False):
         data_query=data_query.squeeze(0)
         data_shot = data_shot.squeeze(0)
 
-        embedding_query = self.encoder(data_query)
+        ret = self.encoder(data_query,retMaps=retMaps)
+        embedding_query = ret[0]
+
+        if retMaps:
+            attMaps,norm = ret[1],ret[2]
+
         embedding_shot = self.encoder(data_shot)
         embedding_shot = self.normalize_feature(embedding_shot)
         embedding_query = self.normalize_feature(embedding_query)
 
+        if self.args.attention == "cross":
+            embedding_shot,embedding_query,attMap_shot,attMap_quer = self.cam(embedding_shot,embedding_query)
+            emb_mean = embedding_shot.mean(dim=-1).mean(dim=-1)
+        else:
+            attMap_shot,attMap_quer = None,None
+            if not self.args.attention == "bcnn":
+                emb_mean = embedding_shot
+
         with torch.no_grad():
-            if self.args.shot==1:
-                proto = embedding_shot
+            if self.args.attention == "bcnn":
+                embedding_shot_pooled = self.base_learner.poolFeat(embedding_shot)
             else:
-                proto=self.fusion(embedding_shot)
+                embedding_shot_pooled = emb_mean
+
+            if self.args.shot==1:
+                proto = retMaps
+            else:
+                proto=self.fusion(embedding_shot_pooled.contiguous())
+
             self.base_learner.fc1_w.data = proto
 
         fast_weights = self.base_learner.vars
@@ -210,26 +416,32 @@ class MetaModel(nn.Module):
         basestep_value_list = []
         batch_shot = embedding_shot
         batch_label = self.label_shot
-        logits_q = self.base_learner(embedding_query, fast_weights)
+        logits_q = self.base_learner(embedding_query, fast_weights,attMap=attMap_quer)
         total_logits = 0.0 * logits_q
 
         for k in range(0, self.update_step):
-
             batch_shot = embedding_shot
             batch_label = self.label_shot
-            logits = self.base_learner(batch_shot, fast_weights) * self.args.temperature
+            logits = self.base_learner(batch_shot, fast_weights,attMap=attMap_shot,quer=False) * self.args.temperature
             loss = F.cross_entropy(logits, batch_label)
             grad = torch.autograd.grad(loss, fast_weights)
-            generated_combination_weights = self.hyperprior_combination_model(embedding_shot, grad, k)
-            generated_basestep_weights = self.hyperprior_basestep_model(embedding_shot, grad, k)
+            generated_combination_weights = self.hyperprior_combination_model(embedding_shot_pooled, grad, k)
+            generated_basestep_weights = self.hyperprior_basestep_model(embedding_shot_pooled, grad, k)
             fast_weights = list(map(lambda p: p[1] - generated_basestep_weights * p[0], zip(grad, fast_weights)))
-            logits_q = self.base_learner(embedding_query, fast_weights)
+            ret = self.base_learner(embedding_query, fast_weights,attMap=attMap_quer,retMaps=retMaps and k == self.update_step -1)
+            if k == self.update_step -1 and retMaps:
+                attMaps,norm = ret[1],ret[2]
+
+            logits_q = ret[0]
             logits_q = logits_q * self.args.temperature
             total_logits += generated_combination_weights * logits_q
             combination_value_list.append(generated_combination_weights)
             basestep_value_list.append(generated_basestep_weights)  
 
-        return total_logits
+        if retMaps:
+            return total_logits,attMaps,norm
+        else:
+            return total_logits
 
     def preval_forward(self, data_shot, data_query):
         data_query=data_query.squeeze(0)

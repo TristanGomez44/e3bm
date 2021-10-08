@@ -73,54 +73,22 @@ class BasicBlock(nn.Module):
 
         return out
 
-def representativeVectors(x,nbVec=3):
-
-    xOrigShape = x.size()
-
-    x = x.permute(0,2,3,1).reshape(x.size(0),x.size(2)*x.size(3),x.size(1))
-    norm = torch.sqrt(torch.pow(x,2).sum(dim=-1)) + 0.00001
-
-    raw_reprVec_score = norm.clone()
-
-    repreVecList = []
-    simList = []
-    for _ in range(nbVec):
-        _,ind = raw_reprVec_score.max(dim=1,keepdim=True)
-        raw_reprVec_norm = norm[torch.arange(x.size(0)).unsqueeze(1),ind]
-        raw_reprVec = x[torch.arange(x.size(0)).unsqueeze(1),ind]
-        sim = (x*raw_reprVec).sum(dim=-1)/(norm*raw_reprVec_norm)
-        simNorm = sim/sim.sum(dim=1,keepdim=True)
-        reprVec = (x*simNorm.unsqueeze(-1)).sum(dim=1)
-        repreVecList.append(reprVec)
-        raw_reprVec_score = (1-sim)*raw_reprVec_score
-        simReshaped = simNorm.reshape(sim.size(0),1,xOrigShape[2],xOrigShape[3])
-        simList.append(simReshaped)
-    
-    repreVecList = torch.cat(repreVecList,dim=-1)
-    return repreVecList
-
-
 class ResNet(nn.Module):
 
-    def __init__(self,block=BasicBlock, keep_prob=1.0, avg_pool=False, drop_rate=0.0, dropblock_size=5,attention="none",nb_vec=3):
+    def __init__(self,block=BasicBlock, keep_prob=1.0, avg_pool=False, drop_rate=0.0, dropblock_size=5,attention="none",nb_vec=3,highRes=False):
         self.inplanes = 3
         super(ResNet, self).__init__()
 
-        cfg = [64,160, 320, 640]
-
-        self.nbVec = nb_vec
         self.attention = attention
-        if self.attention == "bcnn":
-            attention = [BasicBlock(cfg[-1], cfg[-1])]
-            attention.append(conv1x1(cfg[-1], self.nbVec))
-            attention.append(nn.ReLU())
-            self.att = nn.Sequential(*attention)
+        self.nb_vec = nb_vec
+
+        cfg = [64,160, 320, 640]
 
         self.layer1 = self._make_layer(block, cfg[0], stride=2, drop_rate=drop_rate)
         self.layer2 = self._make_layer(block, cfg[1], stride=2, drop_rate=drop_rate)
-        self.layer3 = self._make_layer(block, cfg[2], stride=2, drop_rate=drop_rate, drop_block=True,
+        self.layer3 = self._make_layer(block, cfg[2], stride=1 if highRes else 2, drop_rate=drop_rate, drop_block=True,
                                        block_size=dropblock_size)
-        self.layer4 = self._make_layer(block, cfg[3], stride=2, drop_rate=drop_rate, drop_block=True,
+        self.layer4 = self._make_layer(block, cfg[3], stride=1 if highRes else 2, drop_rate=drop_rate, drop_block=True,
                                        block_size=dropblock_size)
         if avg_pool:
             self.avgpool = nn.AvgPool2d(5, stride=1)
@@ -151,13 +119,8 @@ class ResNet(nn.Module):
 
         return nn.Sequential(*layers)
 
-    def compAtt(self,x):
-        attMaps = self.att(x)
-        x = (attMaps.unsqueeze(2)*x.unsqueeze(1)).reshape(x.size(0),x.size(1)*(attMaps.size(1)),x.size(2),x.size(3))
-        x = self.avgpool(x)
-        return x.view(x.size(0), -1),[attMaps[:,i:i+1] for i in range(attMaps.size(1))]
 
-    def forward(self, x):
+    def forward(self, x,retMaps=False):
         x = self.layer1(x)
 
         x = self.layer2(x)
@@ -167,11 +130,41 @@ class ResNet(nn.Module):
         x = self.layer4(x)
 
         if self.attention == "br_npa":
-            x = representativeVectors(x,self.nbVec)
-        elif self.attention == "bcnn":
-            x,_= self.compAtt(x)
+            x,attMaps = representativeVectors(x,self.nb_vec)
+
+            if retMaps:
+                norm = torch.sqrt(torch.pow(x,2).sum(dim=1,keepdim=True))
+
+        elif self.attention == "none":
+            x = self.avgpool(x)
+        
+        if retMaps:
+            return x,attMaps,norm 
         else:
-            x=F.adaptive_avg_pool2d(x,1).squeeze(-1).squeeze(-1)
+            return x
 
-        return x
+def representativeVectors(x,nbVec=3):
 
+    xOrigShape = x.size()
+
+    x = x.permute(0,2,3,1).reshape(x.size(0),x.size(2)*x.size(3),x.size(1))
+    norm = torch.sqrt(torch.pow(x,2).sum(dim=-1)) + 0.00001
+
+    raw_reprVec_score = norm.clone()
+
+    repreVecList = []
+    simList = []
+    for _ in range(nbVec):
+        _,ind = raw_reprVec_score.max(dim=1,keepdim=True)
+        raw_reprVec_norm = norm[torch.arange(x.size(0)).unsqueeze(1),ind]
+        raw_reprVec = x[torch.arange(x.size(0)).unsqueeze(1),ind]
+        sim = (x*raw_reprVec).sum(dim=-1)/(norm*raw_reprVec_norm)
+        simNorm = sim/sim.sum(dim=1,keepdim=True)
+        reprVec = (x*simNorm.unsqueeze(-1)).sum(dim=1)
+        repreVecList.append(reprVec)
+        raw_reprVec_score = (1-sim)*raw_reprVec_score
+        simReshaped = simNorm.reshape(sim.size(0),1,xOrigShape[2],xOrigShape[3])
+        simList.append(simReshaped)
+    
+    repreVecList = torch.cat(repreVecList,dim=-1)
+    return repreVecList
