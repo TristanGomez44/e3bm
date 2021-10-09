@@ -299,7 +299,7 @@ class MetaTrainer(object):
             tl = tl.item()
             ta = ta.item()
 
-            if epoch % 5 == 1:
+            if epoch % 5 == 0:
                 model.eval() 
 
                 vl = Averager()
