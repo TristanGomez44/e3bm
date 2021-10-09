@@ -12,6 +12,7 @@
 #   permissions and limitations under the License.
 # ==============================================================================
 
+from warnings import simplefilter
 import torch.nn as nn
 import torch
 import torch.nn.functional as F
@@ -167,4 +168,6 @@ def representativeVectors(x,nbVec=3):
         simList.append(simReshaped)
     
     repreVecList = torch.cat(repreVecList,dim=-1)
-    return repreVecList
+    simList = torch.cat(simList,dim=1)    
+
+    return repreVecList,simList
