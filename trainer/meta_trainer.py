@@ -59,6 +59,18 @@ def loadDict(path,model,attention,nb_vec):
 
         if len(actuallyMissing) > 0:
             raise ValueError("Missing",actuallyMissing)
+    elif attention == "bcnn":
+        expToMiss, actuallyMissing = [],[]
+        for key in miss:
+            if key.find("base_learner.att.0") != -1 or key.find("base_learner.vars.1") != -1 or key.find("base_learner.vars.2") != -1:
+                expToMiss.append(key)
+            else:
+                actuallyMissing.append(key)
+        
+        print("Missing",actuallyMissing,"but that is expected")
+
+        if len(actuallyMissing) > 0:
+            raise ValueError("Missing",actuallyMissing)
     else:
         if len(miss) > 0:
             raise ValueError("Missing keys",miss)
@@ -202,12 +214,6 @@ class MetaTrainer(object):
 
         torch.save(dict(params=self.model.state_dict()), osp.join(self.args.save_path, name + '.pth'))
 
-    def crossAttLoss(self,ytest,cls_scores,labels_test,pids):
-        loss1 = self.criterion(ytest, pids.view(-1))
-        loss2 = self.criterion(cls_scores, labels_test.view(-1))
-        loss = loss1 + 0.5 * loss2
-        return loss
-
     def train(self):
         args = self.args
         model = self.model
@@ -257,16 +263,16 @@ class MetaTrainer(object):
                 data_shot, data_query = data[:p], data[p:] 
                 data_shot = data_shot.unsqueeze(0).repeat(args.num_gpu, 1, 1, 1, 1)
                 
-                if args.attention == "cross":
-                    label_one_hot = self.one_hot(label).to(label.device)
-                    label_shot_one_hot = self.one_hot(label_shot).to(label.device)
-                    ytest,cls_scores,logits = self.model((data_shot, data_query))
-                    pids = label_shot
-                    loss = self.crossAttLoss(ytest,cls_scores,label,pids)
-                    logits = logits[0]
-                else:
-                    logits = model((data_shot, data_query)) 
-                    loss = F.cross_entropy(logits, label)
+                #if args.attention == "cross":
+                #    label_one_hot = one_hot(label).to(label.device)
+                #    #label_shot_one_hot = self.one_hot(label_shot).to(label.device)
+                #    cls_scores,logits = self.model((data_shot, data_query))
+                #    pids = label_shot
+                #    loss = self.crossAttLoss(label_one_hot,cls_scores,label,pids)
+                #    logits = logits[0]
+                #else:
+                logits = model((data_shot, data_query)) 
+                loss = F.cross_entropy(logits, label)
 
                 if args.dist:
                     logits_teach = model((data_shot,data_query))
@@ -293,7 +299,7 @@ class MetaTrainer(object):
             tl = tl.item()
             ta = ta.item()
 
-            if epoch % 5 == 0:
+            if epoch % 5 == 1:
                 model.eval() 
 
                 vl = Averager()
