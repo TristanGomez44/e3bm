@@ -19,16 +19,22 @@ case $1 in
     python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_train -dataset tieredimagenet -gpu 2 -attention br_npa -val_episode 500 
     ;;
   "br_npa_opt")
-    python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_train -dataset tieredimagenet -gpu 2 -attention br_npa -optuna       -exp_id tieredimagenet -model_id nodist -max_epoch 50 -val_episode 500 
+    python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_train -dataset tieredimagenet -gpu 2 -attention br_npa -optuna       -exp_id tieredimagenet -model_id nodist -max_epoch 50 -val_episode 500 -num_workers 4
     ;;
   "br_npa_dist")
-    python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_train -dataset tieredimagenet -gpu 0 -attention br_npa -optuna -dist -exp_id tieredimagenet -model_id dist -max_epoch 50 -val_episode 500 
+    python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_train -dataset tieredimagenet -gpu 0 -attention br_npa -optuna -dist -exp_id tieredimagenet -model_id dist -max_epoch 50 -val_episode 500  -num_workers 4
     ;;
   "bcnn")
     python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_eval -dataset tieredimagenet -gpu 2 -attention bcnn
     ;;
+ "bcnn_opt")
+    python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_train -dataset tieredimagenet -gpu 0 -attention bcnn -optuna       -exp_id tieredimagenet -model_id nodist_bcnn -max_epoch 50 -val_episode 500  -num_workers 4
+    ;;
   "cross_att")
     python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_eval -dataset tieredimagenet -gpu 1 -attention cross
+    ;;
+ "crossAtt_opt")
+    python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_train -dataset tieredimagenet -gpu 1 -attention cross -optuna       -exp_id tieredimagenet -model_id nodist_cross -max_epoch 50 -val_episode 500  -num_workers 4
     ;;
   "*")
     echo "no such model"
