@@ -42,6 +42,12 @@ def run(args,trial=None):
             args.kl_temp = trial.suggest_float("kl_temp", 1, 21, step=5)
             args.kl_interp = trial.suggest_float("kl_interp", 0.1, 1, step=0.1)
 
+        if args.more_params:
+            args.lr_combination = trial.suggest_float("lr_combination",1e-7, 1e-5, log=True)
+            args.lr_combination_hyperprior = trial.suggest_float("lr_combination_hyperprior",1e-7, 1e-5, log=True)
+            args.lr_basestep = trial.suggest_float("lr_basestep",1e-7, 1e-5, log=True)
+            args.lr_basestep_hyperprior = trial.suggest_float("lr_basestep_hyperprior",1e-7, 1e-5, log=True)
+
     trainer = MetaTrainer(args)
     if args.mode == 'meta_train':
         print('Start meta-train phase.')
@@ -99,6 +105,7 @@ parser.add_argument('-attention',type=str,default='none')
 parser.add_argument('-nb_vec',type=int,default=3)
 parser.add_argument('-dist',action="store_true")
 parser.add_argument('-optuna',action="store_true")
+parser.add_argument('-more_params',action="store_true")
 parser.add_argument('-optuna_trial_nb',type=int,default=20)
 
 parser.add_argument('-model_id',type=str,default='default')
