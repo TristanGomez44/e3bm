@@ -1,7 +1,7 @@
 
 case $1 in
   "")
-    python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_eval -dataset tieredimagenet -gpu 2
+    python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_eval -dataset tieredimagenet -gpu 1
     ;;
   "br_npa_eval")
     python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_eval -dataset tieredimagenet -gpu 2 -attention br_npa
@@ -26,6 +26,9 @@ case $1 in
     ;;
   "br_npa_dist")
     python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_train -dataset tieredimagenet -gpu 0 -attention br_npa -optuna -dist -exp_id tieredimagenet -model_id dist -max_epoch 50 -val_episode 500  -num_workers 4
+    ;;
+  "br_npa_dist_more")
+    python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_train -dataset tieredimagenet -gpu 0 -attention br_npa -optuna -dist -exp_id tieredimagenet -model_id dist -max_epoch 50 -val_episode 500  -num_workers 4 -more_params -optuna_trial_nb 40
     ;;
   "bcnn")
     python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_eval -dataset tieredimagenet -gpu 2 -attention bcnn
