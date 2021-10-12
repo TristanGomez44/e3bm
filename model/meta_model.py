@@ -431,7 +431,7 @@ class MetaModel(nn.Module):
             if k == self.update_step -1 and retMaps:
                 attMaps,norm = ret[1],ret[2]
 
-            logits_q = ret[0]
+            logits_q = ret[0] if retMaps else ret
             logits_q = logits_q * self.args.temperature
             total_logits += generated_combination_weights * logits_q
             combination_value_list.append(generated_combination_weights)
