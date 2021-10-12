@@ -165,8 +165,6 @@ class BaseLearner(nn.Module):
               
                 input_x = input_x.view(self.args.way*self.args.shot,self.cfg[-1],size,size)
 
-            print(attMap.shape,att_weights.shape,input_x.shape)
-            
             if retMaps:
                 attMaps = (attMap*att_weights).sum(dim=2)
                 norm = torch.sqrt(torch.pow(input_x,2).sum(dim=3))
@@ -184,7 +182,7 @@ class BaseLearner(nn.Module):
             the_vars = self.vars
 
         ret = self.poolFeat(input_x,attMap,quer,the_vars,retMaps=retMaps)
-        input_x = ret[0]
+        input_x = ret[0] if retMaps else ret
 
         fc1_w = the_vars[0]
 
@@ -380,10 +378,11 @@ class MetaModel(nn.Module):
         data_shot = data_shot.squeeze(0)
 
         ret = self.encoder(data_query,retMaps=retMaps)
-        embedding_query = ret[0]
 
         if retMaps:
-            attMaps,norm = ret[1],ret[2]
+            embedding_query,attMaps,norm = ret
+        else:
+            embedding_query = ret
 
         embedding_shot = self.encoder(data_shot)
         embedding_shot = self.normalize_feature(embedding_shot)
