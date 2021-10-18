@@ -13,7 +13,7 @@
 # ==============================================================================
 
 import argparse
-import os
+import os,sys
 import os.path as osp
 import numpy as np
 import torch
@@ -27,6 +27,34 @@ from tensorboardX import SummaryWriter
 import tqdm
 import time
 import importlib
+from gradcam import GradCAMpp
+from score_map import ScoreCam
+from rise import RISE
+import captum
+from captum.attr import (IntegratedGradients,NoiseTunnel)
+
+class VizMod(torch.nn.Module):
+    def __init__(self,net):
+        super().__init__()
+        self.net = net
+        self.layer4 = net.encoder.layer4
+        self.features = net.encoder
+
+    def forward(self,x,fast_weights,retFeat=False):
+
+        feat = self.net.encoder(x,avgpool=False)
+
+        featPooled = feat.mean(-1).mean(-1)
+
+        
+
+        featPooled = self.net.normalize_feature(featPooled)
+        logits_q = self.net.base_learner(featPooled, fast_weights)
+
+        if retFeat:
+            return logits_q,feat 
+        else:
+            return logits_q
 
 def loadDict(path,model,attention,nb_vec):
 
@@ -46,11 +74,14 @@ def loadDict(path,model,attention,nb_vec):
 
     miss,unexp = model.load_state_dict(sd,strict=False)
 
+    print(miss[:10])
+    print(unexp[:10])
+
     if attention == "cross":
         expToMiss = []
         actuallyMissing = []
         for key in miss:
-            if key.find("base_learner.conv") != -1 or key.find("base_learner.vars") != -1:
+            if key.find("base_learner.conv") != -1 or key.find("base_learner.vars") != -1 or key.find("conv1") != -1 or key.find("conv2") != -1:
                 expToMiss.append(key)
             else:
                 actuallyMissing.append(key)
@@ -59,6 +90,7 @@ def loadDict(path,model,attention,nb_vec):
 
         if len(actuallyMissing) > 0:
             raise ValueError("Missing",actuallyMissing)
+
     elif attention == "bcnn":
         expToMiss, actuallyMissing = [],[]
         for key in miss:
@@ -174,39 +206,56 @@ class MetaTrainer(object):
 
         ensure_path(args.save_path)
 
-        trainset = Dataset('train', args)
-        if args.mode == 'pre_train':
-            self.train_loader = DataLoader(dataset=trainset,batch_size=args.bs,shuffle=True, num_workers=args.num_workers, pin_memory=True)
-        else:
-            train_sampler = CategoriesSampler(trainset.label, args.val_frequency*args.bs, args.way, args.shot + args.query)
-            self.train_loader = DataLoader(dataset=trainset, batch_sampler=train_sampler, num_workers=args.num_workers, pin_memory=True)
-
-        valset = Dataset(args.set, args)
-        val_sampler = CategoriesSampler(valset.label, args.val_episode, args.way, args.shot + args.query)
-        self.val_loader = DataLoader(dataset=valset, batch_sampler=val_sampler, num_workers=args.num_workers, pin_memory=True)
-
-        val_loader=[x for x in self.val_loader]
-
-        if args.mode == 'pre_train':
-            self.optimizer = torch.optim.SGD([{'params': self.model.encoder.parameters(), 'lr': args.lr }, \
-                                        {'params': self.model.fc.parameters(), 'lr': args.lr }], \
-                                        momentum=0.9, nesterov=True, weight_decay=0.0005)
-            self.lr_scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=args.step_size, gamma=args.gamma)
-        else:
-            if args.meta_update=='mtl':
-                new_para = filter(lambda p: p.requires_grad, self.model.encoder.parameters())
+        if args.mode == "meta_train":
+            trainset = Dataset('train', args)
+            if args.mode == 'pre_train':
+                self.train_loader = DataLoader(dataset=trainset,batch_size=args.bs,shuffle=True, num_workers=args.num_workers, pin_memory=True)
             else:
-                new_para = self.model.encoder.parameters()
+                train_sampler = CategoriesSampler(trainset.label, args.val_frequency*args.bs, args.way, args.shot + args.query)
+                self.train_loader = DataLoader(dataset=trainset, batch_sampler=train_sampler, num_workers=args.num_workers, pin_memory=True)
 
-            self.optimizer = torch.optim.SGD([{'params': new_para, 'lr': args.lr}, \
-                {'params': self.model.base_learner.parameters(), 'lr': self.args.lr}, \
-                {'params': self.model.get_hyperprior_combination_initialization_vars(), 'lr': self.args.lr_combination}, \
-                {'params': self.model.get_hyperprior_combination_mapping_vars(), 'lr': self.args.lr_combination_hyperprior}, \
-                {'params': self.model.get_hyperprior_basestep_initialization_vars(), 'lr': self.args.lr_basestep}, \
-                {'params': self.model.get_hyperprior_stepsize_mapping_vars(), 'lr': self.args.lr_basestep_hyperprior}], \
-                lr=args.lr, momentum=0.9, nesterov=True, weight_decay=0.0005)
+            valset = Dataset(args.set, args)
+            val_sampler = CategoriesSampler(valset.label, args.val_episode, args.way, args.shot + args.query)
+            self.val_loader = DataLoader(dataset=valset, batch_sampler=val_sampler, num_workers=args.num_workers, pin_memory=True)
 
-            self.lr_scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=args.step_size, gamma=args.gamma)
+            val_loader=[x for x in self.val_loader]
+
+            if args.mode == 'pre_train':
+                self.optimizer = torch.optim.SGD([{'params': self.model.encoder.parameters(), 'lr': args.lr }, \
+                                            {'params': self.model.fc.parameters(), 'lr': args.lr }], \
+                                            momentum=0.9, nesterov=True, weight_decay=0.0005)
+                self.lr_scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=args.step_size, gamma=args.gamma)
+            else:
+                if args.meta_update=='mtl':
+                    new_para = filter(lambda p: p.requires_grad, self.model.encoder.parameters())
+                else:
+                    new_para = self.model.encoder.parameters()
+
+                self.optimizer = torch.optim.SGD([{'params': new_para, 'lr': args.lr}, \
+                    {'params': self.model.base_learner.parameters(), 'lr': self.args.lr}, \
+                    {'params': self.model.get_hyperprior_combination_initialization_vars(), 'lr': self.args.lr_combination}, \
+                    {'params': self.model.get_hyperprior_combination_mapping_vars(), 'lr': self.args.lr_combination_hyperprior}, \
+                    {'params': self.model.get_hyperprior_basestep_initialization_vars(), 'lr': self.args.lr_basestep}, \
+                    {'params': self.model.get_hyperprior_stepsize_mapping_vars(), 'lr': self.args.lr_basestep_hyperprior}], \
+                    lr=args.lr, momentum=0.9, nesterov=True, weight_decay=0.0005)
+
+                self.lr_scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=args.step_size, gamma=args.gamma)
+
+        if self.args.ind_for_viz:
+            self.vizMod = VizMod(self.model)
+
+            if self.args.noise_tunnel:
+                ig = IntegratedGradients(self.vizMod)
+                self.nt = NoiseTunnel(ig)
+                self.data_base = None
+            elif self.args.rise:
+                self.rise_mod = RISE(self.vizMod)
+            else:
+                model_dict = dict(type="resnet", arch=self.vizMod, layer_name='layer4', input_size=(448, 448))
+                self.grad_cam = captum.attr.LayerGradCam(self.vizMod.forward,self.vizMod.layer4)
+                self.grad_cam_pp = GradCAMpp(model_dict)
+                self.guided_backprop_mod = captum.attr.GuidedBackprop(self.vizMod)
+                self.score_mod = ScoreCam(self.vizMod)
 
     def save_model(self, name):
 
@@ -357,7 +406,41 @@ class MetaTrainer(object):
 
         writer.close()
 
-    def eval(self):
+    def normMap(self,maps):
+        maps = 255*(maps-maps.min())/(maps.max()-maps.min())
+        maps = maps.byte()
+        return maps
+    
+    def computeViz(self,ind,data,targ,fast_weights):
+        
+        data,targ = data[ind:ind+1],targ[ind:ind+1]
+
+        fast_weights = fast_weights[0].unsqueeze(0)
+
+        inp = (data,fast_weights)
+        print("NOISE TUNE",self.args.noise_tunnel)
+        if self.args.noise_tunnel:
+            if self.data_base is None:
+                self.data_base = torch.zeros_like(data)
+                if data.device == "cuda":
+                    self.data_base = self.data_base.cuda()
+
+            attr_sq = self.nt.attribute(inp, nt_type='smoothgrad_sq', stdevs=0.02, nt_samples=16,nt_samples_batch_size=3, target=targ)
+            attr_var = self.nt.attribute(inp, nt_type='vargrad', stdevs=0.02, nt_samples=16,nt_samples_batch_size=3, target=targ)
+
+            return {"sq":attr_sq,"var":attr_var}
+        elif self.args.rise:
+            rise_map = self.rise_mod(data,fast_weights,targ).detach().cpu()
+            return {"rise":rise_map}
+        else:
+            mask = self.grad_cam.attribute(inp,targ).detach().cpu()
+            mask_pp = self.grad_cam_pp(data,fast_weights,targ).detach().cpu()
+            map = self.guided_backprop_mod.attribute(inp,targ)[0].detach().cpu()
+            score_map = self.score_mod.generate_cam(data,fast_weights,targ).detach().cpu()
+
+            return {"gradcam":mask,"gradcam_pp":mask_pp,"guided":map,"score_map":score_map}
+
+    def eval(self,finalTest=False):
         model = self.model
         args = self.args
         result_list=[args.save_path]
@@ -377,13 +460,22 @@ class MetaTrainer(object):
         loader = DataLoader(test_set, batch_sampler=sampler, num_workers=args.num_workers, pin_memory=True)
         test_acc_record = np.zeros((3000,))
 
+        if finalTest:
+            test_set_unorm = self.Dataset('test', args,applyNorm=False)
+            sampler = CategoriesSampler(test_set_unorm.label, 3000, args.way, args.shot + args.query)
+            loader_unorm = iter(DataLoader(test_set, batch_sampler=sampler, num_workers=args.num_workers, pin_memory=True))
+        
         if self.args.optuna:
             name = "max_acc_{}".format(self.args.model_id)
         else:
             name = "max_acc"
 
-        print(osp.join(args.save_path, name + '.pth'))
-        model = loadDict(osp.join(args.save_path, name + '.pth'),model,self.args.attention,self.args.nb_vec)
+        if finalTest and self.args.optuna:
+            print("models/{}/model{}_best.pth".format(self.args.exp_id,self.args.model_id))
+            model = loadDict("models/{}/model{}_best.pth".format(self.args.exp_id,self.args.model_id),model,self.args.attention,self.args.nb_vec)
+        else:
+            print(osp.join(args.save_path, name + '.pth'))
+            model = loadDict(osp.join(args.save_path, name + '.pth'),model,self.args.attention,self.args.nb_vec)
         model.eval()
 
         ave_acc = Averager()
@@ -393,22 +485,76 @@ class MetaTrainer(object):
         else:
             label = label.type(torch.LongTensor)
 
-        tqdm_gen = tqdm.tqdm(loader)
-        for i, batch in enumerate(tqdm_gen, 1):
-            if torch.cuda.is_available():
-                data, _ = [_.cuda() for _ in batch]
-            else:
-                data = batch[0]
-            k = args.way * args.shot
-            data_shot, data_query = data[:k], data[k:]
-            data_shot = data_shot.unsqueeze(0).repeat(args.num_gpu, 1, 1, 1, 1)
-            logits = model((data_shot, data_query))
-            acc = count_acc(logits, label)
-            ave_acc.add(acc)
-            test_acc_record[i-1] = acc
-            tqdm_gen.set_description('Episode {}: {:.2f}({:.2f})'.format(i, ave_acc.item() * 100, acc * 100))
+        if finalTest:
+            allAtt,allNorm,allImgs = [],[],[]
 
+        tqdm_gen = tqdm.tqdm(loader)
+
+        inds = np.arange(args.way*args.query)
+
+        if self.args.ind_for_viz and os.path.exists("results/{}/{}_vizDic.pth".format(self.args.exp_id,self.args.model_id)):
+            vizDic= torch.load("results/{}/{}_vizDic.pth".format(self.args.exp_id,self.args.model_id))
+        else:
+            vizDic = {}
+
+        for i, batch in enumerate(tqdm_gen, 1):
+
+            data_unorm = loader_unorm.next()[0]
+
+            if finalTest and self.args.ind_for_viz:
+                matching_inds = list(set(self.args.ind_for_viz).intersection(set(list(inds+args.way*args.query*(i-1)))))
+                forward = len(matching_inds) > 0 or not self.args.only_viz
+            else:
+                forward = True
+
+            if forward:
+                if torch.cuda.is_available():
+                    data, _ = [_.cuda() for _ in batch]
+                else:
+                    data = batch[0]
+
+                k = args.way * args.shot
+                data_shot, data_query = data[:k], data[k:]
+                data_shot = data_shot.unsqueeze(0).repeat(args.num_gpu, 1, 1, 1, 1)
+                ret = model((data_shot, data_query),retMaps=finalTest)
+                logits = ret[0] if finalTest else ret
+
+                acc = count_acc(logits, label)
+                ave_acc.add(acc)
+                test_acc_record[i-1] = acc
+                tqdm_gen.set_description('Episode {}: {:.2f}({:.2f})'.format(i, ave_acc.item() * 100, acc * 100))
+
+            if finalTest and forward:
+                
+                norm = ret[1]
+                norm = self.normMap(norm.cpu())
+                allNorm.append(norm)
+
+                data_unorm = self.normMap(data[k:].cpu())
+                allImgs.append(data_unorm)
+
+                if self.args.attention != "none":
+                    attMaps = ret[2]
+                    attMaps = self.normMap(attMaps.cpu())
+                    allAtt.append(attMaps)
+
+                    fast_weights = ret[3]
+                else:
+                    fast_weights = ret[2]
+
+            if finalTest and self.args.ind_for_viz:
+                if len(matching_inds) > 0:
+                    for ind in matching_inds:
+                        subDic = self.computeViz(ind,data_query,label,fast_weights)
+                        if ind in vizDic:
+                            vizDic[ind].update(subDic)
+                        else:
+                            vizDic[ind] = subDic
+           
         m, pm = compute_confidence_interval(test_acc_record)
+
+        if self.args.ind_for_viz:
+            torch.save(vizDic,"results/{}/{}_vizDic.pth".format(self.args.exp_id,self.args.model_id))
 
         if not 'max_acc_epoch' in trlog:
             trlog['max_acc_epoch'] = -1
@@ -431,6 +577,16 @@ class MetaTrainer(object):
                 print("model_id,m,pm",file=file)
 
             print("{},{},{}".format(args.model_id,m,pm),file=file)
+
+        allNorm = torch.cat(allNorm,dim=0)
+        np.save("./results/{}/norm_{}_test.npy".format(self.args.exp_id,self.args.model_id),allNorm.numpy())
+
+        allImgs = torch.cat(allImgs,dim=0)
+        np.save("./results/{}/imgs_{}_test.npy".format(self.args.exp_id,self.args.model_id),allImgs.numpy())
+
+        if self.args.attention != "none":
+            allAtt = torch.cat(allAtt,dim=0)
+            np.save("./results/{}/attMaps_{}_test.npy".format(self.args.exp_id,self.args.model_id),allAtt.numpy())
 
         return m
 

@@ -91,8 +91,8 @@ class ResNet(nn.Module):
                                        block_size=dropblock_size)
         self.layer4 = self._make_layer(block, cfg[3], stride=1 if highRes else 2, drop_rate=drop_rate, drop_block=True,
                                        block_size=dropblock_size)
-        if avg_pool:
-            self.avgpool = nn.AvgPool2d(5, stride=1)
+        #if avg_pool:
+        self.avgpool = nn.AvgPool2d(5, stride=1)
         self.keep_prob = keep_prob
         self.keep_avg_pool = avg_pool
         self.dropout = nn.Dropout(p=1 - self.keep_prob, inplace=False)
@@ -121,7 +121,7 @@ class ResNet(nn.Module):
         return nn.Sequential(*layers)
 
 
-    def forward(self, x,retMaps=False):
+    def forward(self, x,retMaps=False,avgpool=True):
         x = self.layer1(x)
 
         x = self.layer2(x)
@@ -130,17 +130,19 @@ class ResNet(nn.Module):
 
         x = self.layer4(x)
 
+        if retMaps:
+            norm = torch.sqrt(torch.pow(x,2).sum(dim=1,keepdim=True))
+
         if self.attention == "br_npa":
             x,attMaps = representativeVectors(x,self.nb_vec)
 
-            if retMaps:
-                norm = torch.sqrt(torch.pow(x,2).sum(dim=1,keepdim=True))
-
-        elif self.attention == "none":
-            x = self.avgpool(x)
+        elif self.attention == "none" and avgpool:
+            x = self.avgpool(x).squeeze(-1).squeeze(-1)
         
-        if retMaps:
+        if retMaps and self.attention == "br_npa":
             return x,attMaps,norm 
+        elif retMaps:
+            return x,norm
         else:
             return x
 

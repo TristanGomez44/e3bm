@@ -95,12 +95,6 @@ class BaseLearner(nn.Module):
             self.vars.extend(list(self.att.parameters()))
 
             self.avgpool = nn.AdaptiveAvgPool2d(1)
-        elif self.attention == "cross":
-            self.conv1 = nn.Conv2d(25, 5, 1)
-            self.conv2 = nn.Conv2d(5, 25, 1, stride=1, padding=0)
-            
-            self.vars.extend(list(self.conv1.parameters()))
-            self.vars.extend(list(self.conv2.parameters()))
 
     def compAtt(self,x,the_vars=None,retMaps=False):
 
@@ -140,7 +134,7 @@ class BaseLearner(nn.Module):
 
         return a,att_weights
 
-    def poolFeat(self,input_x,attMap=None,quer=None,the_vars=None,retMaps=False):
+    def poolFeat(self,input_x,the_vars=None,retMaps=False):
         if self.attention == "bcnn":
             input_x,attMaps = self.compAtt(input_x,the_vars,retMaps=retMaps)
 
@@ -148,27 +142,6 @@ class BaseLearner(nn.Module):
                 norm = torch.sqrt(torch.pow(input_x,2).sum(dim=3))
 
         elif self.attention == "cross":
-            attMapShapeBef = attMap.shape
-            attMap,att_weights = self.get_attention(attMap,the_vars=the_vars)
-
-            if quer:
-                size = input_x.shape[-1]
-                input_x = input_x.view(self.args.way,self.args.query,self.cfg[-1],size*size)
-                input_x = input_x.unsqueeze(1) * attMap.unsqueeze(3)
-                input_x = (input_x * att_weights).sum(dim=1)
-                input_x = input_x.view(self.args.way*self.args.query,self.cfg[-1],size,size)
-            else:
-                size = input_x.shape[-2]
-                input_x = input_x.view(self.args.way,self.args.shot,size*size,self.cfg[-1])
-                input_x = input_x.unsqueeze(2).permute(0,1,2,4,3) * attMap.unsqueeze(3)
-                input_x = (input_x * att_weights).sum(dim=2)
-              
-                input_x = input_x.view(self.args.way*self.args.shot,self.cfg[-1],size,size)
-
-            if retMaps:
-                attMaps = (attMap*att_weights).sum(dim=2)
-                norm = torch.sqrt(torch.pow(input_x,2).sum(dim=3))
-
             input_x=F.adaptive_avg_pool2d(input_x,1).squeeze(-1).squeeze(-1)
 
         if retMaps:
@@ -176,12 +149,12 @@ class BaseLearner(nn.Module):
         else:
             return input_x
 
-    def forward(self, input_x, the_vars=None,attMap=None,quer=True,retMaps=False):
+    def forward(self, input_x, the_vars=None,retMaps=False):
 
         if the_vars is None:
             the_vars = self.vars
 
-        ret = self.poolFeat(input_x,attMap,quer,the_vars,retMaps=retMaps)
+        ret = self.poolFeat(input_x,the_vars,retMaps=retMaps)
         input_x = ret[0] if retMaps else ret
 
         fc1_w = the_vars[0]
@@ -287,6 +260,10 @@ class MetaModel(nn.Module):
             self.hyperprior_combination_model = HyperpriorCombination(args, self.update_step, self.z_dim)
             self.hyperprior_basestep_model = HyperpriorBasestep(args, self.update_step, self.update_lr, self.z_dim)
 
+        if self.args.attention == "cross":
+            self.conv1 = nn.Conv1d(25, 5, 1)
+            self.conv2 = nn.Conv1d(5, 25, 1, stride=1, padding=0)
+
     def init_backbone(self,highRes):
         if self.args.backbone == 'resnet12':
             if self.mode == 'pre':
@@ -349,38 +326,82 @@ class MetaModel(nn.Module):
 
     def cam(self, f1, f2):
 
-        f1 = f1.view(self.args.way,self.args.shot,f1.shape[1],f1.shape[2],f1.shape[3])
-        f2 = f2.view(self.args.way,self.args.query,f2.shape[1],f2.shape[2],f2.shape[3])
-      
-        b, n1, c, h, w = f1.size()
-        n2 = f2.size(1)
+        f1 = f1.view(self.args.way*self.args.shot,f1.shape[1],f1.shape[2]*f1.shape[3])
+        f2 = f2.view(self.args.way*self.args.query,f2.shape[1],f2.shape[2]*f2.shape[3])
+        #f1 25 640 25
+        #f2 80 640 25
 
-        f1 = f1.view(b, n1, c, -1) 
-        f2 = f2.view(b, n2, c, -1)
+        f1 = F.normalize(f1, p=2, dim=2, eps=1e-12)
+        f2 = F.normalize(f2, p=2, dim=2, eps=1e-12)
 
-        f1_norm = F.normalize(f1, p=2, dim=2, eps=1e-12)
-        f2_norm = F.normalize(f2, p=2, dim=2, eps=1e-12)
-        
-        f1_norm = f1_norm.transpose(2, 3).unsqueeze(2) 
-        f2_norm = f2_norm.unsqueeze(1)
+        r = (f1.unsqueeze(0).unsqueeze(3)*f2.unsqueeze(1).unsqueeze(4)).sum(dim=2)
 
-        a1 = torch.matmul(f1_norm, f2_norm) 
+        r = r.view(f2.shape[0]*f1.shape[0],r.shape[2],r.shape[3])
+    
+        ##############  attention for f1
+        #r 80*25 25 25
+        w_f1 = self.conv2(torch.relu(self.conv1(r.mean(dim=-1,keepdim=True))))
+        #w 80*25 25 1
+        w_f1 = w_f1.view(f2.shape[0],f1.shape[0],w_f1.shape[1],1)
+        #w 80 25 25 1
 
-        a2 = a1.transpose(3, 4) 
+        a_f1_spat = torch.softmax(w_f1,dim=2)
+        #w 80 25 25 1
+        a_f1_spat =  a_f1_spat.permute(0,1,3,2)
+        #w 80 25 1 25
 
-        f1 = f1.view(b*n1, c, h, w)
-        f2 = f2.view(b*n2, c, h, w)
+        f1_quer = f1.unsqueeze(0)*a_f1_spat
+        #f1_quer 80 25 640 25
 
-        return f1, f2,a1,a2
+        a_f1_quer = torch.softmax(w_f1.mean(dim=2,keepdim=True),dim=0)
+        #w 80 25 1 1
+
+        f1 = (f1_quer*a_f1_quer).sum(dim=0)
+        #25 640 25
+    
+        ##############  attention for f1 
+        #r 80*25 25 25
+        r = r.permute(0,2,1)
+        w_f2 = self.conv2(torch.relu(self.conv1(r.mean(dim=-1,keepdim=True))))
+        #w 80*25 25 1
+        w_f2 = w_f2.view(f2.shape[0],f1.shape[0],w_f2.shape[1],1)
+        #w 80 25 25 1      
+
+        a_f2_spat = torch.softmax(w_f2,dim=2)
+        #w 80 25 25 1
+        a_f2_spat =  a_f2_spat.permute(0,1,3,2)
+        #w 80 25 1 25
+
+        f2_shot = f2.unsqueeze(1)*a_f2_spat
+        #f2_shot 80 25 640 25
+
+        a_f2_shot = torch.softmax(w_f2.mean(dim=2,keepdim=True),dim=1)
+        #w 80 25 1 1
+
+        f2 = (f2_shot*a_f2_shot).sum(dim=1)
+        #80 640 25
+
+        attMaps = (a_f2_shot*a_f2_spat).sum(dim=1)
+        #80 1 1 25
+        map_size = int(math.sqrt(attMaps.shape[-1]))
+        attMaps = attMaps.view(attMaps.shape[0],1,map_size,map_size)
+        #80 1 5 5
+
+        f1 = f1.view(f1.shape[0],f1.shape[1],map_size,map_size)
+        f2 = f2.view(f2.shape[0],f2.shape[1],map_size,map_size)
+           
+        return f1, f2,attMaps
 
     def meta_forward(self, data_shot, data_query,retMaps=False):
         data_query=data_query.squeeze(0)
         data_shot = data_shot.squeeze(0)
 
-        ret = self.encoder(data_query,retMaps=retMaps)
+        ret = self.encoder(data_query,retMaps=retMaps and (self.args.attention == "br_npa" or self.args.attention == "none"))
 
-        if retMaps:
+        if retMaps and self.args.attention == "br_npa":
             embedding_query,attMaps,norm = ret
+        elif retMaps and self.args.attention == "none":
+            embedding_query,norm = ret
         else:
             embedding_query = ret
 
@@ -389,8 +410,12 @@ class MetaModel(nn.Module):
         embedding_query = self.normalize_feature(embedding_query)
 
         if self.args.attention == "cross":
-            embedding_shot,embedding_query,attMap_shot,attMap_quer = self.cam(embedding_shot,embedding_query)
+            embedding_shot,embedding_query,attMaps = self.cam(embedding_shot,embedding_query)
             emb_mean = embedding_shot.mean(dim=-1).mean(dim=-1)
+
+            if retMaps:
+                norm = torch.sqrt(torch.pow(embedding_query,2).sum(dim=1,keepdim=True))
+
         else:
             attMap_shot,attMap_quer = None,None
             if not self.args.attention == "bcnn":
@@ -415,30 +440,34 @@ class MetaModel(nn.Module):
         basestep_value_list = []
         batch_shot = embedding_shot
         batch_label = self.label_shot
-        logits_q = self.base_learner(embedding_query, fast_weights,attMap=attMap_quer)
+        logits_q = self.base_learner(embedding_query, fast_weights)
         total_logits = 0.0 * logits_q
+
+        retMaps_base = retMaps and not (self.args.attention == "br_npa" or self.args.attention == "none")
 
         for k in range(0, self.update_step):
             batch_shot = embedding_shot
             batch_label = self.label_shot
-            logits = self.base_learner(batch_shot, fast_weights,attMap=attMap_shot,quer=False) * self.args.temperature
+            logits = self.base_learner(batch_shot, fast_weights) * self.args.temperature
             loss = F.cross_entropy(logits, batch_label)
             grad = torch.autograd.grad(loss, fast_weights)
             generated_combination_weights = self.hyperprior_combination_model(embedding_shot_pooled, grad, k)
             generated_basestep_weights = self.hyperprior_basestep_model(embedding_shot_pooled, grad, k)
             fast_weights = list(map(lambda p: p[1] - generated_basestep_weights * p[0], zip(grad, fast_weights)))
-            ret = self.base_learner(embedding_query, fast_weights,attMap=attMap_quer,retMaps=retMaps and k == self.update_step -1)
-            if k == self.update_step -1 and retMaps:
+            ret = self.base_learner(embedding_query, fast_weights)
+            if k == self.update_step -1 and retMaps_base:
                 attMaps,norm = ret[1],ret[2]
-
-            logits_q = ret[0] if retMaps else ret
+            
+            logits_q = ret[0] if retMaps_base else ret
             logits_q = logits_q * self.args.temperature
             total_logits += generated_combination_weights * logits_q
             combination_value_list.append(generated_combination_weights)
             basestep_value_list.append(generated_basestep_weights)  
 
-        if retMaps:
-            return total_logits,attMaps,norm
+        if retMaps and self.args.attention != "none":
+            return total_logits,norm,attMaps,fast_weights
+        elif retMaps:
+            return total_logits,norm,fast_weights
         else:
             return total_logits
 
