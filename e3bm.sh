@@ -1,7 +1,7 @@
 
 case $1 in
   "")
-    python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_eval -dataset tieredimagenet -gpu 1
+    python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_eval -dataset tieredimagenet -gpu 1 -ind_for_viz 1 2 -only_viz -exp_id tieredimagenet -model_id baseline -rise -seed 1
     ;;
   "br_npa_eval")
     python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_eval -dataset tieredimagenet -gpu 2 -attention br_npa
@@ -28,7 +28,7 @@ case $1 in
     python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_train -dataset tieredimagenet -gpu 0 -attention br_npa -optuna -dist -exp_id tieredimagenet -model_id dist -max_epoch 50 -val_episode 500  -num_workers 4
     ;;
   "br_npa_dist_more")
-    python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_train -dataset tieredimagenet -gpu 0 -attention br_npa -optuna -dist -exp_id tieredimagenet -model_id dist -max_epoch 50 -val_episode 500  -num_workers 4 -more_params -optuna_trial_nb 40
+    python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_train -dataset tieredimagenet -gpu 1 -attention br_npa -optuna -dist -exp_id tieredimagenet -model_id dist -max_epoch 50 -val_episode 500  -num_workers 4 -more_params -optuna_trial_nb 40 -seed 1
     ;;
   "bcnn")
     python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_eval -dataset tieredimagenet -gpu 2 -attention bcnn
@@ -40,7 +40,7 @@ case $1 in
     python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_eval -dataset tieredimagenet -gpu 1 -attention cross
     ;;
  "crossAtt_opt")
-    python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_train -dataset tieredimagenet -gpu 1 -attention cross -optuna       -exp_id tieredimagenet -model_id nodist_cross -max_epoch 50 -val_episode 500  -num_workers 4
+    python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_train -dataset tieredimagenet -gpu 0 -attention cross -optuna       -exp_id tieredimagenet -model_id nodist_cross -max_epoch 50 -val_episode 500  -num_workers 4 -query 13
     ;;
   "*")
     echo "no such model"
