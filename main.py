@@ -28,10 +28,53 @@ import time
 import importlib
 from trainer.meta_trainer import MetaTrainer
 import optuna,sqlite3
+import shutil
 
-def run(args,trial=None):
+    
+def getBestTrial(exp_id,model_id,trialNb=None):
+    con = sqlite3.connect("./results/{}/{}_hypSearch.db".format(exp_id,model_id))
+    curr = con.cursor()
 
-    if args.optuna:
+    curr.execute('SELECT trial_id,value FROM trials WHERE study_id == 1')
+    query_res = curr.fetchall()
+
+    query_res = list(filter(lambda x:not x[1] is None,query_res))
+
+    trialIds = [id_value[0] for id_value in query_res]
+    values = [id_value[1] for id_value in query_res]
+
+    if not trialNb is None:
+        trialIds = trialIds[:trialNb]
+        values = values[:trialNb]
+
+    bestTrial = trialIds[np.array(values).argmax()]
+
+    return bestTrial
+
+def setBestParams(args):
+
+    trialId = getBestTrial(args.exp_id,args.model_id)
+
+    con = sqlite3.connect("./results/{}/{}_hypSearch.db".format(args.exp_id,args.model_id))
+    curr = con.cursor()
+
+    dic = vars(args)
+
+    params = ["lr","temperature","step_size","gamma","dropout","base_lr","kl_temp","kl_interp","lr_combination",\
+              "lr_combination_hyperprior","lr_basestep","lr_basestep_hyperprior"]
+
+    for param in params:
+        curr.execute("SELECT param_value FROM trial_params WHERE trial_id == {} and param_name == '{}' ".format(trialId,param))
+        query_res = curr.fetchall()
+        if len(query_res) > 0:
+            param_val = type(dic[param])(query_res[0][0])
+            args.__dict__[param] = param_val
+
+    return args
+
+def run(args,trial=None,finalTest=False):
+
+    if args.optuna and not finalTest:
         args.lr = trial.suggest_float("lr",0.0005, 0.05, log=True)
         args.temperature = trial.suggest_float("temperature",4, 12, step=4)
         args.step_size = trial.suggest_int("step_size",5,20,step=5)
@@ -50,13 +93,17 @@ def run(args,trial=None):
 
     trainer = MetaTrainer(args)
     if args.mode == 'meta_train':
-        print('Start meta-train phase.')
-        trainer.train()
+        if finalTest and not os.path.exists("models/{}/model{}_best.pth".format(args.exp_id,args.model_id)):
+            print('Start meta-train phase.')
+            trainer.train()
+            name = "max_acc_"+args.model_id
+            path = osp.join(args.save_path, name + '.pth')
+            shutil.copyfile(path,"models/{}/model{}_best.pth".format(args.exp_id,args.model_id))
         print('Start meta-test phase.')
-        value = trainer.eval()
+        value = trainer.eval(finalTest=finalTest)
     elif args.mode == 'meta_eval':
         print('Start meta-test phase.')
-        value = trainer.eval()
+        value = trainer.eval(finalTest=finalTest)
     elif args.mode == 'pre_train':
         print('Start pre-train phase.')
         trainer.pre_train()
@@ -96,6 +143,8 @@ parser.add_argument('-lr_combination', type=float, default=1e-6)
 parser.add_argument('-lr_combination_hyperprior', type=float, default=1e-6)
 parser.add_argument('-lr_basestep', type=float, default=1e-6)
 parser.add_argument('-lr_basestep_hyperprior', type=float, default=1e-6)
+parser.add_argument('-kl_temp', type=float, default=8)
+parser.add_argument('-kl_interp', type=float, default=0.5)
 parser.add_argument('-sleep',type=float,help='hour',default=0.0)
 parser.add_argument('-gpu', default='0')
 parser.add_argument('-gpu_occupy',action='store_true')
@@ -110,6 +159,12 @@ parser.add_argument('-optuna_trial_nb',type=int,default=20)
 
 parser.add_argument('-model_id',type=str,default='default')
 parser.add_argument('-exp_id',type=str,default='default')
+
+parser.add_argument('-ind_for_viz',type=int,nargs="*")
+parser.add_argument('-only_viz',action="store_true")
+parser.add_argument('-noise_tunnel',action="store_true")
+parser.add_argument('-rise',action="store_true")
+
 
 args = parser.parse_args()
 print(vars(args))
@@ -166,6 +221,9 @@ if args.optuna:
             study.optimize(objective,n_trials=args.optuna_trial_nb-trialsAlreadyDone+failedTrials)
             studyDone = True
 
+    args = setBestParams(args)
+    run(args,finalTest=True)
+
 else:
-    run(args)
-    
+    run(args,finalTest=True)
+
