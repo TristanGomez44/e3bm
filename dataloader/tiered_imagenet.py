@@ -21,7 +21,7 @@ import numpy as np
 from os.path import expanduser
 
 class tieredImageNet(Dataset):
-    def __init__(self, setname, args=None, train_aug=False):
+    def __init__(self, setname, args=None, train_aug=False,applyNorm=True):
 
         data_base_dir = 'data/tiered_imagenet'
         if os.path.exists(data_base_dir):
@@ -30,6 +30,8 @@ class tieredImageNet(Dataset):
             print ('Download tieredImageNet from Google Drive.')
             os.makedirs(data_base_dir)
             os.system('sh scripts/download_tieredimagenet.sh')
+
+        self.applyNorm = applyNorm
 
         TRAIN_PATH = 'data/tiered_imagenet/train'
         VAL_PATH = 'data/tiered_imagenet/val'
@@ -60,13 +62,19 @@ class tieredImageNet(Dataset):
 
         if setname == 'val' or setname == 'test':
             image_size = 84
-            self.transform = transforms.Compose([
-                transforms.Resize([92, 92]),
-                transforms.CenterCrop(image_size),
 
-                transforms.ToTensor(),
-                transforms.Normalize(np.array([x / 255.0 for x in [125.3, 123.0, 113.9]]),
-                                     np.array([x / 255.0 for x in [63.0, 62.1, 66.7]]))])
+            if applyNorm:
+                self.transform = transforms.Compose([
+                    transforms.Resize([92, 92]),
+                    transforms.CenterCrop(image_size),
+                    transforms.ToTensor(),
+                    transforms.Normalize(np.array([x / 255.0 for x in [125.3, 123.0, 113.9]]),
+                                        np.array([x / 255.0 for x in [63.0, 62.1, 66.7]]))])
+            else:
+                self.transform = transforms.Compose([
+                    transforms.Resize([92, 92]),
+                    transforms.CenterCrop(image_size),
+                    transforms.ToTensor()])                  
 
         elif setname == 'train':
             image_size = 84
