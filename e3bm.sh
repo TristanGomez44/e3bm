@@ -1,7 +1,22 @@
 
-case $1 in
+#2405,2410,3368,6622,6632,3238,3365,6735,6745
+case $1 in 
   "")
-    python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_eval -dataset tieredimagenet -gpu 1 -ind_for_viz 1 2 -only_viz -exp_id tieredimagenet -model_id baseline -rise -seed 1
+    python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_eval -dataset tieredimagenet -gpu 1 -ind_for_viz 3946 2085 2090 2119 2124 2129 2116 2121 2131 -only_viz -exp_id tieredimagenet -model_id baseline -rise -seed 1
+    python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_eval -dataset tieredimagenet -gpu 1 -ind_for_viz 3946 2085 2090 2119 2124 2129 2116 2121 2131 -only_viz -exp_id tieredimagenet -model_id baseline -noise_tunnel -seed 1
+    python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_eval -dataset tieredimagenet -gpu 1 -ind_for_viz 3946 2085 2090 2119 2124 2129 2116 2121 2131 -only_viz -exp_id tieredimagenet -model_id baseline -seed 1
+    ;;
+  "norm")
+    python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_eval -dataset tieredimagenet -gpu 1 -exp_id tieredimagenet -model_id baseline -rise -seed 1
+    ;;
+  "new_inds")
+    python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_eval -dataset tieredimagenet -gpu 1 -ind_for_viz 2405 2410 3368 6622 6632 3238 3365 6735 6745 -only_viz -exp_id tieredimagenet -model_id baseline -rise -seed 1
+    python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_eval -dataset tieredimagenet -gpu 1 -ind_for_viz 2405 2410 3368 6622 6632 3238 3365 6735 6745 -only_viz -exp_id tieredimagenet -model_id baseline -noise_tunnel -seed 1
+    python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_eval -dataset tieredimagenet -gpu 1 -ind_for_viz 2405 2410 3368 6622 6632 3238 3365 6735 6745 -only_viz -exp_id tieredimagenet -model_id baseline -seed 1
+    python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_eval -dataset tieredimagenet -gpu 1 -exp_id tieredimagenet -model_id baseline -rise -seed 1
+    ;;
+  "norm")
+    python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_eval -dataset tieredimagenet -gpu 1 -exp_id tieredimagenet -model_id baseline -rise -seed 1
     ;;
   "br_npa_eval")
     python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_eval -dataset tieredimagenet -gpu 2 -attention br_npa
@@ -30,17 +45,20 @@ case $1 in
   "br_npa_dist_more")
     python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_train -dataset tieredimagenet -gpu 1 -attention br_npa -optuna -dist -exp_id tieredimagenet -model_id dist -max_epoch 50 -val_episode 500  -num_workers 4 -more_params -optuna_trial_nb 40 -seed 1
     ;;
+  "br_npa_dist_more_val")
+    python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_train -dataset tieredimagenet -gpu 1 -attention br_npa -optuna -dist -exp_id tieredimagenet -model_id dist -max_epoch 50 -val_episode 500  -num_workers 4 -more_params -optuna_trial_nb 40 -seed 1 -test_on_val
+    ;;
   "bcnn")
     python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_eval -dataset tieredimagenet -gpu 2 -attention bcnn
     ;;
  "bcnn_opt")
-    python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_train -dataset tieredimagenet -gpu 0 -attention bcnn -optuna       -exp_id tieredimagenet -model_id nodist_bcnn -max_epoch 50 -val_episode 500  -num_workers 4
+    python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_train -dataset tieredimagenet -gpu 0 -attention bcnn -optuna       -exp_id tieredimagenet -model_id nodist_bcnn -max_epoch 50 -val_episode 500  -num_workers 4 -seed 1 -optuna_trial_nb 18
     ;;
   "cross_att")
     python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_eval -dataset tieredimagenet -gpu 1 -attention cross
     ;;
  "crossAtt_opt")
-    python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_train -dataset tieredimagenet -gpu 0 -attention cross -optuna       -exp_id tieredimagenet -model_id nodist_cross -max_epoch 50 -val_episode 500  -num_workers 4 -query 13
+    python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_train -dataset tieredimagenet -gpu 1 -attention cross -optuna       -exp_id tieredimagenet -model_id nodist_cross -max_epoch 50 -val_episode 500  -num_workers 4 -seed 1
     ;;
   "*")
     echo "no such model"

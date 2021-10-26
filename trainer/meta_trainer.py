@@ -412,13 +412,13 @@ class MetaTrainer(object):
         return maps
     
     def computeViz(self,ind,data,targ,fast_weights):
-        
+
         data,targ = data[ind:ind+1],targ[ind:ind+1]
 
         fast_weights = fast_weights[0].unsqueeze(0)
 
         inp = (data,fast_weights)
-        print("NOISE TUNE",self.args.noise_tunnel)
+
         if self.args.noise_tunnel:
             if self.data_base is None:
                 self.data_base = torch.zeros_like(data)
@@ -427,17 +427,17 @@ class MetaTrainer(object):
 
             attr_sq = self.nt.attribute(inp, nt_type='smoothgrad_sq', stdevs=0.02, nt_samples=16,nt_samples_batch_size=3, target=targ)
             attr_var = self.nt.attribute(inp, nt_type='vargrad', stdevs=0.02, nt_samples=16,nt_samples_batch_size=3, target=targ)
-
             return {"sq":attr_sq,"var":attr_var}
+
         elif self.args.rise:
             rise_map = self.rise_mod(data,fast_weights,targ).detach().cpu()
             return {"rise":rise_map}
+
         else:
             mask = self.grad_cam.attribute(inp,targ).detach().cpu()
             mask_pp = self.grad_cam_pp(data,fast_weights,targ).detach().cpu()
             map = self.guided_backprop_mod.attribute(inp,targ)[0].detach().cpu()
             score_map = self.score_mod.generate_cam(data,fast_weights,targ).detach().cpu()
-
             return {"gradcam":mask,"gradcam_pp":mask_pp,"guided":map,"score_map":score_map}
 
     def eval(self,finalTest=False):
@@ -455,16 +455,18 @@ class MetaTrainer(object):
             trlog['args'] = vars(args)
         else:
             trlog = torch.load(osp.join(args.save_path, 'trlog'+suff))
-        test_set = self.Dataset('test', args)
+
+        torch.save(torch.get_rng_state(),"results/{}/rng_state_{}.pth".format(args.exp_id,args.model_id))
+
+        if args.model_id != "dist":
+            dist_rng_state = torch.load("results/{}/rng_state_dist.pth".format(args.exp_id))
+            torch.set_rng_state(dist_rng_state)
+  
+        test_set = self.Dataset('val' if args.test_on_val else 'test')
         sampler = CategoriesSampler(test_set.label, 3000, args.way, args.shot + args.query)
         loader = DataLoader(test_set, batch_sampler=sampler, num_workers=args.num_workers, pin_memory=True)
         test_acc_record = np.zeros((3000,))
 
-        if finalTest:
-            test_set_unorm = self.Dataset('test', args,applyNorm=False)
-            sampler = CategoriesSampler(test_set_unorm.label, 3000, args.way, args.shot + args.query)
-            loader_unorm = iter(DataLoader(test_set, batch_sampler=sampler, num_workers=args.num_workers, pin_memory=True))
-        
         if self.args.optuna:
             name = "max_acc_{}".format(self.args.model_id)
         else:
@@ -498,8 +500,6 @@ class MetaTrainer(object):
             vizDic = {}
 
         for i, batch in enumerate(tqdm_gen, 1):
-
-            data_unorm = loader_unorm.next()[0]
 
             if finalTest and self.args.ind_for_viz:
                 matching_inds = list(set(self.args.ind_for_viz).intersection(set(list(inds+args.way*args.query*(i-1)))))
@@ -545,12 +545,14 @@ class MetaTrainer(object):
             if finalTest and self.args.ind_for_viz:
                 if len(matching_inds) > 0:
                     for ind in matching_inds:
-                        subDic = self.computeViz(ind,data_query,label,fast_weights)
+                        subDic = self.computeViz(ind%len(data_query),data_query,label,fast_weights)
                         if ind in vizDic:
                             vizDic[ind].update(subDic)
                         else:
                             vizDic[ind] = subDic
            
+                        vizDic[ind]["imgs"] = data_query[ind%len(data_query)]
+
         m, pm = compute_confidence_interval(test_acc_record)
 
         if self.args.ind_for_viz:
@@ -578,15 +580,18 @@ class MetaTrainer(object):
 
             print("{},{},{}".format(args.model_id,m,pm),file=file)
 
-        allNorm = torch.cat(allNorm,dim=0)
-        np.save("./results/{}/norm_{}_test.npy".format(self.args.exp_id,self.args.model_id),allNorm.numpy())
+        suff = 'val' if args.test_on_val else 'test'
+
+        if not self.args.ind_for_viz:
+            allNorm = torch.cat(allNorm,dim=0)
+            np.save("./results/{}/norm_{}_{}.npy".format(self.args.exp_id,self.args.model_id,suff),allNorm.numpy())
 
         allImgs = torch.cat(allImgs,dim=0)
-        np.save("./results/{}/imgs_{}_test.npy".format(self.args.exp_id,self.args.model_id),allImgs.numpy())
+        np.save("./results/{}/imgs_{}_{}.npy".format(self.args.exp_id,self.args.model_id,suff),allImgs.numpy())
 
         if self.args.attention != "none":
             allAtt = torch.cat(allAtt,dim=0)
-            np.save("./results/{}/attMaps_{}_test.npy".format(self.args.exp_id,self.args.model_id),allAtt.numpy())
+            np.save("./results/{}/attMaps_{}_{}.npy".format(self.args.exp_id,self.args.model_id,suff),allAtt.numpy())
 
         return m
 

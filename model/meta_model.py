@@ -96,7 +96,7 @@ class BaseLearner(nn.Module):
 
             self.avgpool = nn.AdaptiveAvgPool2d(1)
 
-    def compAtt(self,x,the_vars=None,retMaps=False):
+    def compAtt(self,x,the_vars=None):
 
         if the_vars is None:
             the_vars = self.vars
@@ -136,17 +136,19 @@ class BaseLearner(nn.Module):
 
     def poolFeat(self,input_x,the_vars=None,retMaps=False):
         if self.attention == "bcnn":
-            input_x,attMaps = self.compAtt(input_x,the_vars,retMaps=retMaps)
-
             if retMaps:
                 norm = torch.sqrt(torch.pow(input_x,2).sum(dim=3))
+
+            input_x,attMaps = self.compAtt(input_x,the_vars)
+            
+            if retMaps:
+                return input_x,attMaps,norm
+            else:
+                return input_x
 
         elif self.attention == "cross":
             input_x=F.adaptive_avg_pool2d(input_x,1).squeeze(-1).squeeze(-1)
 
-        if retMaps:
-            return input_x,attMaps,norm
-        else:
             return input_x
 
     def forward(self, input_x, the_vars=None,retMaps=False):
@@ -161,7 +163,7 @@ class BaseLearner(nn.Module):
 
         net = F.linear(F.normalize(input_x, p=2, dim=1), F.normalize(fc1_w, p=2, dim=1))
         
-        if retMaps:
+        if retMaps and self.attention == "bcnn":
             return net,ret[1],ret[2]
         else:
             return net
@@ -382,9 +384,18 @@ class MetaModel(nn.Module):
         #80 640 25
 
         attMaps = (a_f2_shot*a_f2_spat).sum(dim=1)
+
+        #Choosing the top nb_vec attention maps
+        _,top_inds = a_f2_shot.squeeze(-1).squeeze(-1).topk(self.args.nb_vec,dim=1)
+
+        attMaps = []
+        for i in range(len(top_inds)):
+            attMaps.append(a_f2_spat[i][top_inds[i]].unsqueeze(0))
+        attMaps = torch.cat(attMaps,dim=0)
+
         #80 1 1 25
         map_size = int(math.sqrt(attMaps.shape[-1]))
-        attMaps = attMaps.view(attMaps.shape[0],1,map_size,map_size)
+        attMaps = attMaps.view(attMaps.shape[0],self.args.nb_vec,map_size,map_size)
         #80 1 5 5
 
         f1 = f1.view(f1.shape[0],f1.shape[1],map_size,map_size)
@@ -428,9 +439,9 @@ class MetaModel(nn.Module):
                 embedding_shot_pooled = emb_mean
 
             if self.args.shot==1:
-                proto = retMaps
+                proto = embedding_shot_pooled.contiguous()
             else:
-                proto=self.fusion(embedding_shot_pooled.contiguous())
+                proto= self.fusion(embedding_shot_pooled.contiguous())
 
             self.base_learner.fc1_w.data = proto
 
@@ -443,7 +454,7 @@ class MetaModel(nn.Module):
         logits_q = self.base_learner(embedding_query, fast_weights)
         total_logits = 0.0 * logits_q
 
-        retMaps_base = retMaps and not (self.args.attention == "br_npa" or self.args.attention == "none")
+        retMaps_bcnn = retMaps and self.args.attention == "bcnn"
 
         for k in range(0, self.update_step):
             batch_shot = embedding_shot
@@ -454,11 +465,11 @@ class MetaModel(nn.Module):
             generated_combination_weights = self.hyperprior_combination_model(embedding_shot_pooled, grad, k)
             generated_basestep_weights = self.hyperprior_basestep_model(embedding_shot_pooled, grad, k)
             fast_weights = list(map(lambda p: p[1] - generated_basestep_weights * p[0], zip(grad, fast_weights)))
-            ret = self.base_learner(embedding_query, fast_weights)
-            if k == self.update_step -1 and retMaps_base:
+            ret = self.base_learner(embedding_query, fast_weights,k == self.update_step -1 and retMaps_bcnn)
+            if k == self.update_step -1 and retMaps_bcnn:
                 attMaps,norm = ret[1],ret[2]
             
-            logits_q = ret[0] if retMaps_base else ret
+            logits_q = ret[0] if k == self.update_step -1 and retMaps_bcnn else ret
             logits_q = logits_q * self.args.temperature
             total_logits += generated_combination_weights * logits_q
             combination_value_list.append(generated_combination_weights)
