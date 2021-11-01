@@ -122,6 +122,22 @@ class DataParallelModel(nn.DataParallel):
         except AttributeError:
             return getattr(self.module, name)
 
+def one_hot(labels_train):
+    """
+    Turn the labels_train to one-hot encoding.
+    Args:
+        labels_train: [batch_size, num_train_examples]
+    Return:
+        labels_train_1hot: [batch_size, num_train_examples, K]
+    """
+    labels_train = labels_train.cpu()
+    nKnovel = 1 + labels_train.max()
+    labels_train_1hot_size = list(labels_train.size()) + [nKnovel,]
+    labels_train_unsqueeze = labels_train.unsqueeze(dim=labels_train.dim())
+    labels_train_1hot = torch.zeros(labels_train_1hot_size).scatter_(len(labels_train_1hot_size) - 1, labels_train_unsqueeze, 1)
+    return labels_train_1hot
+
+
 class MetaTrainer(object):
     def __init__(self, args):
         self.args = args
@@ -312,15 +328,15 @@ class MetaTrainer(object):
                 data_shot, data_query = data[:p], data[p:] 
                 data_shot = data_shot.unsqueeze(0).repeat(args.num_gpu, 1, 1, 1, 1)
                 
-                #if args.attention == "cross":
-                #    label_one_hot = one_hot(label).to(label.device)
-                #    #label_shot_one_hot = self.one_hot(label_shot).to(label.device)
-                #    cls_scores,logits = self.model((data_shot, data_query))
-                #    pids = label_shot
-                #    loss = self.crossAttLoss(label_one_hot,cls_scores,label,pids)
-                #    logits = logits[0]
-                #else:
-                logits = model((data_shot, data_query)) 
+                if args.attention == "cross" and args.cross_att_loss:
+                    logits,att_weights = self.model((data_shot, data_query))
+                    loss1 = F.cross_entropy(logits, label)
+                    loss2 = F.cross_entropy(att_weights, label)
+                    loss = loss1 + args.cross_att_loss_weight * loss2
+
+                else:
+                    logits = model((data_shot, data_query)) 
+                
                 loss = F.cross_entropy(logits, label)
 
                 if args.dist:
@@ -364,6 +380,7 @@ class MetaTrainer(object):
                     data_shot, data_query = data[:p], data[p:]
                     data_shot = data_shot.unsqueeze(0).repeat(args.num_gpu, 1, 1, 1, 1)
                     logits = model((data_shot, data_query))
+                    
                     loss = F.cross_entropy(logits, label)
                     acc = count_acc(logits, label)
 
@@ -580,18 +597,19 @@ class MetaTrainer(object):
 
             print("{},{},{}".format(args.model_id,m,pm),file=file)
 
-        suff = 'val' if args.test_on_val else 'test'
+        if finalTest:
+            suff = 'val' if args.test_on_val else 'test'
 
-        if not self.args.ind_for_viz:
-            allNorm = torch.cat(allNorm,dim=0)
-            np.save("./results/{}/norm_{}_{}.npy".format(self.args.exp_id,self.args.model_id,suff),allNorm.numpy())
+            if not self.args.ind_for_viz:
+                allNorm = torch.cat(allNorm,dim=0)
+                np.save("./results/{}/norm_{}_{}.npy".format(self.args.exp_id,self.args.model_id,suff),allNorm.numpy())
 
-        allImgs = torch.cat(allImgs,dim=0)
-        np.save("./results/{}/imgs_{}_{}.npy".format(self.args.exp_id,self.args.model_id,suff),allImgs.numpy())
+            allImgs = torch.cat(allImgs,dim=0)
+            np.save("./results/{}/imgs_{}_{}.npy".format(self.args.exp_id,self.args.model_id,suff),allImgs.numpy())
 
-        if self.args.attention != "none":
-            allAtt = torch.cat(allAtt,dim=0)
-            np.save("./results/{}/attMaps_{}_{}.npy".format(self.args.exp_id,self.args.model_id,suff),allAtt.numpy())
+            if self.args.attention != "none":
+                allAtt = torch.cat(allAtt,dim=0)
+                np.save("./results/{}/attMaps_{}_{}.npy".format(self.args.exp_id,self.args.model_id,suff),allAtt.numpy())
 
         return m
 

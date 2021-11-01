@@ -106,6 +106,7 @@ class BaseLearner(nn.Module):
         
         x = (attMaps.unsqueeze(2)*x.unsqueeze(1)).reshape(x.size(0),x.size(1)*(attMaps.size(1)),x.size(2),x.size(3))
         x = self.avgpool(x)
+
         return x.view(x.size(0), -1),attMaps
 
     def get_attention(self, a,quer=True,the_vars=None):
@@ -135,9 +136,10 @@ class BaseLearner(nn.Module):
         return a,att_weights
 
     def poolFeat(self,input_x,the_vars=None,retMaps=False):
+
         if self.attention == "bcnn":
             if retMaps:
-                norm = torch.sqrt(torch.pow(input_x,2).sum(dim=3))
+                norm = torch.sqrt(torch.pow(input_x,2).sum(dim=1,keepdim=True))
 
             input_x,attMaps = self.compAtt(input_x,the_vars)
             
@@ -149,6 +151,9 @@ class BaseLearner(nn.Module):
         elif self.attention == "cross":
             input_x=F.adaptive_avg_pool2d(input_x,1).squeeze(-1).squeeze(-1)
 
+            return input_x
+
+        else:
             return input_x
 
     def forward(self, input_x, the_vars=None,retMaps=False):
@@ -380,6 +385,12 @@ class MetaModel(nn.Module):
         a_f2_shot = torch.softmax(w_f2.mean(dim=2,keepdim=True),dim=1)
         #w 80 25 1 1
 
+        w_f2_mean = w_f2.mean(dim=2,keepdim=True)
+        #w 80 25 1 1
+        w_f2_mean_resh = w_f2_mean.view(w_f2_mean.shape[0],self.args.way,self.args.shot)
+        #w 80 5 5
+        w_f2_classMean = w_f2_mean_resh.mean(dim=2)       
+
         f2 = (f2_shot*a_f2_shot).sum(dim=1)
         #80 640 25
 
@@ -390,7 +401,13 @@ class MetaModel(nn.Module):
 
         attMaps = []
         for i in range(len(top_inds)):
-            attMaps.append(a_f2_spat[i][top_inds[i]].unsqueeze(0))
+            attMap = []
+            for j in range(self.args.nb_vec):
+                attMap.append(a_f2_spat[i][top_inds[i][j]].unsqueeze(0))
+            
+            attMap = torch.cat(attMap,dim=0)
+            attMaps.append(attMap.unsqueeze(0))
+        
         attMaps = torch.cat(attMaps,dim=0)
 
         #80 1 1 25
@@ -401,7 +418,7 @@ class MetaModel(nn.Module):
         f1 = f1.view(f1.shape[0],f1.shape[1],map_size,map_size)
         f2 = f2.view(f2.shape[0],f2.shape[1],map_size,map_size)
            
-        return f1, f2,attMaps
+        return f1, f2,attMaps,w_f2_classMean
 
     def meta_forward(self, data_shot, data_query,retMaps=False):
         data_query=data_query.squeeze(0)
@@ -421,7 +438,7 @@ class MetaModel(nn.Module):
         embedding_query = self.normalize_feature(embedding_query)
 
         if self.args.attention == "cross":
-            embedding_shot,embedding_query,attMaps = self.cam(embedding_shot,embedding_query)
+            embedding_shot,embedding_query,attMaps,w_f2_classMean = self.cam(embedding_shot,embedding_query)
             emb_mean = embedding_shot.mean(dim=-1).mean(dim=-1)
 
             if retMaps:
@@ -480,7 +497,10 @@ class MetaModel(nn.Module):
         elif retMaps:
             return total_logits,norm,fast_weights
         else:
-            return total_logits
+            if self.args.attention == "cross" and self.args.cross_att_loss and self.training:
+                return total_logits,w_f2_classMean
+            else:
+                return total_logits
 
     def preval_forward(self, data_shot, data_query):
         data_query=data_query.squeeze(0)

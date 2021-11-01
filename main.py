@@ -91,9 +91,15 @@ def run(args,trial=None,finalTest=False):
             args.lr_basestep = trial.suggest_float("lr_basestep",1e-7, 1e-5, log=True)
             args.lr_basestep_hyperprior = trial.suggest_float("lr_basestep_hyperprior",1e-7, 1e-5, log=True)
 
+        if args.opt_loss:
+            args.cross_att_loss_weight = trial.suggest_float("cross_att_loss_weight",0.05, 4, log=True)
+
     trainer = MetaTrainer(args)
+    
+    print(finalTest,args.mode)
+
     if args.mode == 'meta_train':
-        if finalTest and not os.path.exists("models/{}/model{}_best.pth".format(args.exp_id,args.model_id)):
+        if not finalTest or (finalTest and not os.path.exists("models/{}/model{}_best.pth".format(args.exp_id,args.model_id))):
             print('Start meta-train phase.')
             trainer.train()
             name = "max_acc_"+args.model_id
@@ -164,7 +170,10 @@ parser.add_argument('-ind_for_viz',type=int,nargs="*")
 parser.add_argument('-only_viz',action="store_true")
 parser.add_argument('-noise_tunnel',action="store_true")
 parser.add_argument('-rise',action="store_true")
-
+parser.add_argument('-test_on_val',action="store_true")
+parser.add_argument('-cross_att_loss',action="store_true")
+parser.add_argument('-opt_loss',action="store_true")
+parser.add_argument('-cross_att_loss_weight',type=float,default=0.5)
 
 args = parser.parse_args()
 print(vars(args))

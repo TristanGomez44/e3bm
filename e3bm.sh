@@ -60,10 +60,21 @@ case $1 in
  "crossAtt_opt")
     python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_train -dataset tieredimagenet -gpu 1 -attention cross -optuna       -exp_id tieredimagenet -model_id nodist_cross -max_epoch 50 -val_episode 500  -num_workers 4 -seed 1
     ;;
+ "crossAtt_opt_more")
+    python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_train -dataset tieredimagenet -gpu 1 -attention cross -optuna       -exp_id tieredimagenet -model_id nodist_cross -max_epoch 200 -val_episode 500  -num_workers 4 -seed 1 -optuna_trial_nb 40
+    ;;
+ "crossAtt_opt_loss")
+    python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_train -dataset tieredimagenet -gpu 0 -attention cross -optuna       -exp_id tieredimagenet -model_id nodist_cross_loss -max_epoch 50 -val_episode 500  -num_workers 4 -seed 1 -cross_att_loss -query 13
+    ;;
+ "crossAtt_opt_loss_more")
+    python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_train -dataset tieredimagenet -gpu 0 -attention cross -optuna       -exp_id tieredimagenet -model_id nodist_cross_loss -max_epoch 50 -val_episode 500  -num_workers 4 -seed 1 -cross_att_loss -query 13 -optuna_trial_nb 40 -opt_loss -more_params
+    ;;
   "*")
     echo "no such model"
     ;;
 esac
+
+
 
 
 
