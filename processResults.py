@@ -43,10 +43,15 @@ def loadAttNormImgs(exp_id,model_id,test_on_val=False):
     attMaps = np.load("results/{}/attMaps_{}_{}.npy".format(exp_id,model_id,suff),mmap_mode="r")
     attMaps = normMap(attMaps)
 
+    print("results/{}/attMaps_{}_{}.npy".format(exp_id,model_id,suff),attMaps.shape)
+    
+
+
     imgs = np.load("results/{}/imgs_{}_{}.npy".format(exp_id,model_id,suff),mmap_mode="r")
     imgs = normMap(imgs)
 
     norms = loadNorm(exp_id,model_id,suff)
+    print(norms.shape,attMaps.shape,model_id)
     attMaps = attMaps*norms
     return attMaps,norms,imgs
 
@@ -54,13 +59,17 @@ def mixAndCat(catImg,map,img):
     mix = 0.8*map+0.2*img.mean(dim=1,keepdims=True)
     return torch.cat((catImg,mix),dim=0)
 
-def visMaps(exp_id,model_id,viz_id,vizOrder,nrows,img_to_plot,plot_id,test_on_val,only_dist):
+def visMaps(exp_id,model_id,viz_id,vizOrder,cross_id,bcnn_id,nrows,img_to_plot,plot_id,test_on_val,only_dist):
 
     suff = "val" if test_on_val else "test"
 
     cmPlasma = plt.get_cmap('plasma')
 
     attMaps,_,imgs = loadAttNormImgs(exp_id,model_id,test_on_val=test_on_val)
+
+    attMaps_bcnn,_,_ = loadAttNormImgs(exp_id,bcnn_id,test_on_val=test_on_val)
+    attMaps_cross,_,_ = loadAttNormImgs(exp_id,cross_id,test_on_val=test_on_val)
+
     if not only_dist:
         norms = loadNorm(exp_id,viz_id,suff)
         viz_dic = torch.load(os.path.join("results",exp_id,viz_id+"_vizDic.pth"))
@@ -114,23 +123,27 @@ def visMaps(exp_id,model_id,viz_id,vizOrder,nrows,img_to_plot,plot_id,test_on_va
             else:
                 raise ValueError("Can't find {} in vizDic of {}".format(i,viz_id))
 
-        attMap = torch.tensor(attMaps[i:i+1])
-        attMap = (attMap-attMap.min())/(attMap.max()-attMap.min())
-        attMap = reshape(attMap,smooth=False)
-
-        catImg = mixAndCat(catImg,attMap,img)
+        catImg = preproc_and_cat(attMaps_bcnn,i,catImg,img,smooth=True)
+        catImg = preproc_and_cat(attMaps_cross,i,catImg,img,smooth=True)
+        catImg = preproc_and_cat(attMaps,i,catImg,img)
 
         if i % 80 == 79:
             
             outPath = "./vis/{}/{}_{}_{}_attMaps_{}.png".format(exp_id,model_id,i,plot_id,suff)
             torchvision.utils.save_image(catImg,outPath,nrow=nrows)
-            #os.system("convert -resize 20% {} {}".format(outPath,outPath.replace(".png","_small.png")))
             catImg = None
 
     if not img_to_plot is None:
         outPath = "./vis/{}/{}_{}_attMaps_{}.png".format(exp_id,model_id,plot_id,suff)
         torchvision.utils.save_image(catImg,outPath,nrow=nrows)
-        #os.system("convert -resize 20% {} {}".format(outPath,outPath.replace(".png","_small.png")))
+        os.system("convert -resize 20% {} {}".format(outPath,outPath.replace(".png","_small.png")))
+
+def preproc_and_cat(attMaps,i,catImg,img,smooth=False):
+    attMap = torch.tensor(attMaps[i:i+1])
+    attMap = (attMap-attMap.min())/(attMap.max()-attMap.min())
+    attMap = reshape(attMap,smooth=smooth)
+    catImg = mixAndCat(catImg,attMap,img)
+    return catImg
 
 def match(img,imgs,ind):
 
@@ -158,7 +171,9 @@ if __name__ == "__main__":
     parser.add_argument('--exp_id',type=str,default="tieredimagenet")
     parser.add_argument('--viz_id',type=str,default="baseline")
     parser.add_argument('--model_id',type=str,default="dist")
-    parser.add_argument('--nrows',type=int,default=10)
+    parser.add_argument('--cross_id',type=str,default="nodist_cross")
+    parser.add_argument('--bcnn_id',type=str,default="nodist_bcnn")
+    parser.add_argument('--nrows',type=int,default=12)
     parser.add_argument('--plot_id',type=str,default="")
     parser.add_argument('--img_inds',type=int,nargs="*")
     parser.add_argument('--classes_to_plot',type=int,nargs="*")
@@ -166,12 +181,13 @@ if __name__ == "__main__":
     parser.add_argument('--img_to_plot',type=int,nargs="*",default=[2405,2410,3368,6622,6632,3238,3365,6735,6745])
     parser.add_argument('--test_on_val',action='store_true')
     parser.add_argument('--only_dist',action='store_true')
+
     parser.add_argument('--nb_per_class',type=int)
     args = parser.parse_args()
 
     vizOrder = ['gradcam', 'gradcam_pp', 'norm','rise','score_map','guided' ,'sq', 'var']
     #vizOrder = ['imgs','gradcam', 'gradcam_pp', 'score_map','guided']
 
-    visMaps(args.exp_id,args.model_id,args.viz_id,vizOrder,args.nrows,args.img_to_plot,args.plot_id,args.test_on_val,args.only_dist)
+    visMaps(args.exp_id,args.model_id,args.viz_id,vizOrder,args.cross_id,args.bcnn_id,args.nrows,args.img_to_plot,args.plot_id,args.test_on_val,args.only_dist)
 
 
