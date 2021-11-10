@@ -15,6 +15,11 @@ case $1 in
     python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_eval -dataset tieredimagenet -gpu 1 -ind_for_viz 2405 2410 3368 6622 6632 3238 3365 6735 6745 -only_viz -exp_id tieredimagenet -model_id baseline -seed 1
     python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_eval -dataset tieredimagenet -gpu 1 -exp_id tieredimagenet -model_id baseline -rise -seed 1
     ;;
+  "supp")
+    python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_eval -dataset tieredimagenet -gpu 1 -ind_for_viz 2176 2190 2235 240 245 250 282 317 6835 263 278 318 1763 1773 1793 7363 7428 3804  -only_viz -exp_id tieredimagenet -model_id baseline -rise -seed 1
+    python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_eval -dataset tieredimagenet -gpu 1 -ind_for_viz 2176 2190 2235 240 245 250 282 317 6835 263 278 318 1763 1773 1793 7363 7428 3804  -only_viz -exp_id tieredimagenet -model_id baseline -noise_tunnel -seed 1
+    python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_eval -dataset tieredimagenet -gpu 1 -ind_for_viz 2176 2190 2235 240 245 250 282 317 6835 263 278 318 1763 1773 1793 7363 7428 3804  -only_viz -exp_id tieredimagenet -model_id baseline -seed 1
+    ;;   
   "norm")
     python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_eval -dataset tieredimagenet -gpu 1 -exp_id tieredimagenet -model_id baseline -rise -seed 1
     ;;
@@ -68,6 +73,9 @@ case $1 in
     ;;
  "crossAtt_opt_loss_more")
     python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_train -dataset tieredimagenet -gpu 0 -attention cross -optuna       -exp_id tieredimagenet -model_id nodist_cross_loss -max_epoch 50 -val_episode 500  -num_workers 4 -seed 1 -cross_att_loss -query 13 -optuna_trial_nb 40 -opt_loss -more_params
+    ;;
+ "crossAtt_opt_loss_more_origFunc")
+    python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_train -dataset tieredimagenet -gpu 0 -attention cross -optuna       -exp_id tieredimagenet -model_id nodist_cross_loss_origfunc -max_epoch 50 -val_episode 500  -num_workers 4 -seed 1 -cross_att_loss -query 13 -optuna_trial_nb 40 -opt_loss -more_params
     ;;
   "*")
     echo "no such model"

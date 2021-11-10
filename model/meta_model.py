@@ -22,6 +22,131 @@ import math
 import sys
 
 
+class ConvBlock(nn.Module):
+    """Basic convolutional block:
+    convolution + batch normalization.
+    Args (following http://pytorch.org/docs/master/nn.html#torch.nn.Conv2d):
+    - in_c (int): number of input channels.
+    - out_c (int): number of output channels.
+    - k (int or tuple): kernel size.
+    - s (int or tuple): stride.
+    - p (int or tuple): padding.
+    """
+    def __init__(self, in_c, out_c, k, s=1, p=0):
+        super(ConvBlock, self).__init__()
+        self.conv = nn.Conv2d(in_c, out_c, k, stride=s, padding=p)
+        self.bn = nn.BatchNorm2d(out_c)
+
+    def forward(self, x):
+        return self.bn(self.conv(x))
+
+class CAM(nn.Module):
+    def __init__(self,args):
+        super(CAM, self).__init__()
+        self.conv1 = ConvBlock(25, 5, 1)
+        self.conv2 = nn.Conv2d(5, 25, 1, stride=1, padding=0)
+
+        for m in self.modules():
+            if isinstance(m, nn.Conv2d):
+                n = m.kernel_size[0] * m.kernel_size[1] * m.out_channels
+                m.weight.data.normal_(0, math.sqrt(2. / n))
+
+        self.args = args
+
+    def get_attention(self, a):
+        input_a = a
+
+        a = a.mean(3) 
+        a = a.transpose(1, 3) 
+        a = F.relu(self.conv1(a))
+        a = self.conv2(a) 
+        a = a.transpose(1, 3)
+        a = a.unsqueeze(3) 
+        
+        a_unormalized = torch.mean(input_a * a, -1) 
+        a = F.softmax(a_unormalized / 0.025, dim=-1) + 1
+        return a,a_unormalized
+
+    def reshapeAttention(self,a2):
+        a2 = a2.squeeze(0)
+        #25 65 25 
+        a2 = a2.permute(1,0,2)
+        #65 25 25 
+        mapSize = int(math.sqrt(a2.shape[-1]))
+        a2 = a2.view(a2.shape[0],a2.shape[1],mapSize,mapSize)
+        #65 25 5 5
+        return a2
+
+    def selectAttention(self,a2,a2_unormalized):
+
+        #a2.shape = 1, 25, 65, 25
+        a2 = self.reshapeAttention(a2)
+        a2_unormalized = self.reshapeAttention(a2_unormalized)
+        #a2.shape = 65 25 5 5
+
+        a2_unormalized_mean = a2_unormalized.mean(dim=-1).mean(dim=-1)
+        #a2_unormalized_mean.shape = 65 25
+
+        #Choosing the top nb_vec attention maps
+        _,top_inds = a2_unormalized_mean.topk(self.args.nb_vec,dim=1)
+
+        attMaps = []
+        for i in range(len(top_inds)):
+            attMap = []
+            for j in range(self.args.nb_vec):
+                attMap.append(a2[i][top_inds[i][j]].unsqueeze(0))
+            
+            attMap = torch.cat(attMap,dim=0)
+            attMaps.append(attMap.unsqueeze(0))
+        
+        attMaps = torch.cat(attMaps,dim=0)
+
+        return attMaps 
+
+    def forward(self, f1, f2):
+
+        #f1 = f1.view(self.args.way*self.args.shot,f1.shape[1],f1.shape[2]*f1.shape[3])
+        #f2 = f2.view(self.args.way*self.args.query,f2.shape[1],f2.shape[2]*f2.shape[3])
+
+        b, n1, c, h, w = 1,self.args.way*self.args.shot,f1.shape[1],f1.shape[2],f1.shape[3]
+        n2 = self.args.way*self.args.query
+
+        f1 = f1.view(b, n1, c, -1) 
+        f2 = f2.view(b, n2, c, -1)
+
+        f1_norm = F.normalize(f1, p=2, dim=2, eps=1e-12)
+        f2_norm = F.normalize(f2, p=2, dim=2, eps=1e-12)
+        
+        f1_norm = f1_norm.transpose(2, 3).unsqueeze(2) 
+        f2_norm = f2_norm.unsqueeze(1)
+
+        a1 = torch.matmul(f1_norm, f2_norm) 
+        a2 = a1.transpose(3, 4) 
+
+        a1,_ = self.get_attention(a1)
+        a2,a2_unormalized = self.get_attention(a2) 
+
+        f1 = f1.unsqueeze(2) * a1.unsqueeze(3)
+        f1 = f1.view(b, n1, n2, c, h, w)
+        f2 = f2.unsqueeze(1) * a2.unsqueeze(3)
+        f2 = f2.view(b, n1, n2, c, h, w)
+
+        attMaps = self.selectAttention(a2,a2_unormalized)
+
+        a2_unormalized = self.reshapeAttention(a2_unormalized)
+        #a2_unormalized.shape = 65 25 5 5
+        a2_unormalized_mean = a2_unormalized.mean(dim=-1).mean(dim=-1)
+        #65 25
+        a2_unormalized_mean = a2_unormalized_mean.view(a2_unormalized_mean.shape[0],self.args.way,self.args.shot)
+        #65 5 5
+        similarities_to_classes = a2_unormalized_mean.mean(dim=2)
+        #65 5 
+
+        f1 = f1.squeeze(0).mean(dim=1)
+        f2 = f2.squeeze(0).mean(dim=0)
+
+        return f1, f2,attMaps,similarities_to_classes
+
 def conv3x3(in_planes, out_planes, stride=1):
     """3x3 convolution with padding"""
     return Conv2dMtl(in_planes, out_planes, kernel_size=3, stride=stride,
@@ -268,8 +393,10 @@ class MetaModel(nn.Module):
             self.hyperprior_basestep_model = HyperpriorBasestep(args, self.update_step, self.update_lr, self.z_dim)
 
         if self.args.attention == "cross":
-            self.conv1 = nn.Conv1d(25, 5, 1)
-            self.conv2 = nn.Conv1d(5, 25, 1, stride=1, padding=0)
+            #self.conv1 = nn.Conv1d(25, 5, 1)
+            #self.conv2 = nn.Conv1d(5, 25, 1, stride=1, padding=0)
+
+            self.cam = CAM(args)
 
     def init_backbone(self,highRes):
         if self.args.backbone == 'resnet12':
@@ -331,6 +458,7 @@ class MetaModel(nn.Module):
     def get_hyperprior_stepsize_mapping_vars(self):
         return self.hyperprior_basestep_model.get_hyperprior_mapping_vars()
 
+    '''
     def cam(self, f1, f2):
 
         f1 = f1.view(self.args.way*self.args.shot,f1.shape[1],f1.shape[2]*f1.shape[3])
@@ -341,7 +469,14 @@ class MetaModel(nn.Module):
         f1 = F.normalize(f1, p=2, dim=2, eps=1e-12)
         f2 = F.normalize(f2, p=2, dim=2, eps=1e-12)
 
+        #testFeatureVolume(f1)
+
+        #print(f1.shape,norm.shape,norm.mean().item(),norm.max().item())
+
         r = (f1.unsqueeze(0).unsqueeze(3)*f2.unsqueeze(1).unsqueeze(4)).sum(dim=2)
+
+        print(r.shape,f1.shape,f1.unsqueeze(0).unsqueeze(3).shape,f2.shape,f2.unsqueeze(1).unsqueeze(4).shape)
+        print((f1.unsqueeze(0).unsqueeze(3)*f2.unsqueeze(1).unsqueeze(4)).shape)
 
         r = r.view(f2.shape[0]*f1.shape[0],r.shape[2],r.shape[3])
     
@@ -415,10 +550,13 @@ class MetaModel(nn.Module):
         attMaps = attMaps.view(attMaps.shape[0],self.args.nb_vec,map_size,map_size)
         #80 1 5 5
 
+        #testFeatureVolume(f1)
+
         f1 = f1.view(f1.shape[0],f1.shape[1],map_size,map_size)
         f2 = f2.view(f2.shape[0],f2.shape[1],map_size,map_size)
            
         return f1, f2,attMaps,w_f2_classMean
+    '''
 
     def meta_forward(self, data_shot, data_query,retMaps=False):
         data_query=data_query.squeeze(0)
@@ -438,7 +576,7 @@ class MetaModel(nn.Module):
         embedding_query = self.normalize_feature(embedding_query)
 
         if self.args.attention == "cross":
-            embedding_shot,embedding_query,attMaps,w_f2_classMean = self.cam(embedding_shot,embedding_query)
+            embedding_shot,embedding_query,attMaps,similarities_to_classes = self.cam(embedding_shot,embedding_query)
             emb_mean = embedding_shot.mean(dim=-1).mean(dim=-1)
 
             if retMaps:
@@ -498,7 +636,7 @@ class MetaModel(nn.Module):
             return total_logits,norm,fast_weights
         else:
             if self.args.attention == "cross" and self.args.cross_att_loss and self.training:
-                return total_logits,w_f2_classMean
+                return total_logits,similarities_to_classes
             else:
                 return total_logits
 
@@ -538,3 +676,17 @@ class MetaModel(nn.Module):
             total_logits += logits_q
 
         return total_logits
+
+def testNorm(norm):
+    norm_permuted = norm.permute(2,1,0)
+    even_indexes = (torch.arange(norm_permuted.shape[0]) % 2 == 0)
+    odd_indexes = ~even_indexes
+    norm_even_permuted,norm_odd_permuted = norm_permuted[even_indexes],norm_permuted[odd_indexes]
+    norm_even, norm_odd = norm_even_permuted.permute(2,1,0),norm_odd_permuted.permute(2,1,0)
+    print(norm_even.shape,norm_odd.shape,norm_even.mean().item(),norm_even.max().item(),norm_odd.mean().item(),norm_odd.max().item())
+
+def testFeatureVolume(f1):
+    norm = torch.sqrt(torch.pow(f1,2).sum(dim=1,keepdim=True))
+    if len(norm.shape) > 3:
+        norm = norm.view(norm.shape[0],norm.shape[1],-1)
+    testNorm(norm)

@@ -189,7 +189,6 @@ class MetaTrainer(object):
             
             miss,unexp = self.model.load_state_dict(model_dict,strict=False)
             if len(miss) > 0 or len(unexp) > 0:
-                #self.model.load_state_dict(torch.load(args.dir)['params'],strict=False)
                 print("DIR",args.dir)
                 self.model = loadDict(args.dir,self.model,self.args.attention,self.args.nb_vec)
 
@@ -309,7 +308,6 @@ class MetaTrainer(object):
         SLEEP(args)
 
         for epoch in range(1, args.max_epoch + 1):
-            print (args.save_path)
             start_time=time.time()
 
             tl = Averager()
@@ -544,9 +542,10 @@ class MetaTrainer(object):
             if finalTest and forward:
                 
                 norm = ret[1]
+
                 norm = self.normMap(norm.cpu())
                 allNorm.append(norm)
-
+    
                 data_unorm = self.normMap(data[k:].cpu())
                 allImgs.append(data_unorm)
 
@@ -562,6 +561,7 @@ class MetaTrainer(object):
             if finalTest and self.args.ind_for_viz:
                 if len(matching_inds) > 0:
                     for ind in matching_inds:
+                        print("Ind",ind)
                         subDic = self.computeViz(ind%len(data_query),data_query,label,fast_weights)
                         if ind in vizDic:
                             vizDic[ind].update(subDic)
@@ -602,6 +602,8 @@ class MetaTrainer(object):
 
             if not self.args.ind_for_viz:
                 allNorm = torch.cat(allNorm,dim=0)
+                print("end")
+                testNorm(allNorm.float().view(allNorm.shape[0],allNorm.shape[1],-1))
                 np.save("./results/{}/norm_{}_{}.npy".format(self.args.exp_id,self.args.model_id,suff),allNorm.numpy())
 
             allImgs = torch.cat(allImgs,dim=0)
@@ -732,3 +734,11 @@ class MetaTrainer(object):
         result_list=['Best validation epoch {},\nbest val Acc {:.4f}'.format(trlog['max_acc_epoch'], trlog['max_acc'],)]
         save_list_to_txt(os.path.join(args.save_path,'results.txt'),result_list)
 
+def testNorm(norm):
+    norm = norm.view(norm.shape[0],norm.shape[1],-1)
+    norm_permuted = norm.permute(2,1,0)
+    even_indexes = (torch.arange(norm_permuted.shape[0]) % 2 == 0)
+    odd_indexes = ~even_indexes
+    norm_even_permuted,norm_odd_permuted = norm_permuted[even_indexes],norm_permuted[odd_indexes]
+    norm_even, norm_odd = norm_even_permuted.permute(2,1,0),norm_odd_permuted.permute(2,1,0)
+    print(norm_even.shape,norm_odd.shape,norm_even.mean().item(),norm_even.max().item(),norm_odd.mean().item(),norm_odd.max().item())
