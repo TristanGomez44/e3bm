@@ -45,15 +45,15 @@ def loadAttNormImgs(exp_id,model_id,test_on_val=False):
 
     print("results/{}/attMaps_{}_{}.npy".format(exp_id,model_id,suff),attMaps.shape)
     
-
-
     imgs = np.load("results/{}/imgs_{}_{}.npy".format(exp_id,model_id,suff),mmap_mode="r")
     imgs = normMap(imgs)
 
     norms = loadNorm(exp_id,model_id,suff)
-    print(norms.shape,attMaps.shape,model_id)
+
     attMaps = attMaps*norms
+
     return attMaps,norms,imgs
+
 
 def mixAndCat(catImg,map,img):
     mix = 0.8*map+0.2*img.mean(dim=1,keepdims=True)
@@ -65,10 +65,11 @@ def visMaps(exp_id,model_id,viz_id,vizOrder,cross_id,bcnn_id,nrows,img_to_plot,p
 
     cmPlasma = plt.get_cmap('plasma')
 
+    attMaps_cross,_,_ = loadAttNormImgs(exp_id,cross_id,test_on_val=test_on_val)
+
     attMaps,_,imgs = loadAttNormImgs(exp_id,model_id,test_on_val=test_on_val)
 
     attMaps_bcnn,_,_ = loadAttNormImgs(exp_id,bcnn_id,test_on_val=test_on_val)
-    attMaps_cross,_,_ = loadAttNormImgs(exp_id,cross_id,test_on_val=test_on_val)
 
     if not only_dist:
         norms = loadNorm(exp_id,viz_id,suff)
@@ -125,7 +126,7 @@ def visMaps(exp_id,model_id,viz_id,vizOrder,cross_id,bcnn_id,nrows,img_to_plot,p
 
         catImg = preproc_and_cat(attMaps_bcnn,i,catImg,img,smooth=True)
         catImg = preproc_and_cat(attMaps_cross,i,catImg,img,smooth=True)
-        catImg = preproc_and_cat(attMaps,i,catImg,img)
+        catImg = preproc_and_cat(attMaps,i,catImg,img,smooth=True)
 
         if i % 80 == 79:
             
@@ -171,7 +172,7 @@ if __name__ == "__main__":
     parser.add_argument('--exp_id',type=str,default="tieredimagenet")
     parser.add_argument('--viz_id',type=str,default="baseline")
     parser.add_argument('--model_id',type=str,default="dist")
-    parser.add_argument('--cross_id',type=str,default="nodist_cross")
+    parser.add_argument('--cross_id',type=str,default="nodist_cross_loss")
     parser.add_argument('--bcnn_id',type=str,default="nodist_bcnn")
     parser.add_argument('--nrows',type=int,default=12)
     parser.add_argument('--plot_id',type=str,default="")
