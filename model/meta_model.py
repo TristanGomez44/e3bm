@@ -41,7 +41,7 @@ class ConvBlock(nn.Module):
         return self.bn(self.conv(x))
 
 class CAM(nn.Module):
-    def __init__(self,args):
+    def __init__(self,args,scale_cls=7):
         super(CAM, self).__init__()
         self.conv1 = ConvBlock(25, 5, 1)
         self.conv2 = nn.Conv2d(5, 25, 1, stride=1, padding=0)
@@ -52,6 +52,7 @@ class CAM(nn.Module):
                 m.weight.data.normal_(0, math.sqrt(2. / n))
 
         self.args = args
+        self.scale_cls = 7
 
     def get_attention(self, a):
         input_a = a
@@ -103,13 +104,84 @@ class CAM(nn.Module):
 
         return attMaps 
 
-    def forward(self, f1, f2):
+    def test(self, ftrain, ftest):
+        ftest = ftest.mean(4)
+        ftest = ftest.mean(4)
+        ftest = F.normalize(ftest, p=2, dim=ftest.dim()-1, eps=1e-12)
+        ftrain = F.normalize(ftrain, p=2, dim=ftrain.dim()-1, eps=1e-12)
+        scores = self.scale_cls * torch.sum(ftest * ftrain, dim=-1)
+        return scores
 
-        #f1 = f1.view(self.args.way*self.args.shot,f1.shape[1],f1.shape[2]*f1.shape[3])
-        #f2 = f2.view(self.args.way*self.args.query,f2.shape[1],f2.shape[2]*f2.shape[3])
+    def one_hot(self,labels_train):
+        origDev = labels_train.device
+        labels_train = labels_train.cpu()
+        nKnovel = 5
+        labels_train_1hot_size = list(labels_train.size()) + [nKnovel,]
+        labels_train_unsqueeze = labels_train.unsqueeze(dim=labels_train.dim())
+        labels_train_1hot = torch.zeros(labels_train_1hot_size).scatter_(len(labels_train_1hot_size) - 1, labels_train_unsqueeze, 1)
+        return labels_train_1hot.to(origDev)
 
-        b, n1, c, h, w = 1,self.args.way*self.args.shot,f1.shape[1],f1.shape[2],f1.shape[3]
-        n2 = self.args.way*self.args.query
+    def reshapeForCAM(self,tensor):
+        size = list(tensor.size()[1:])
+        tensor = tensor.view(self.args.way,tensor.shape[0]//self.args.way,*size)
+        return tensor
+    
+    def forward(self,ftrain,ftest,ytrain,ytest):
+        
+        ytrain,ytest = self.one_hot(ytrain),self.one_hot(ytest)
+
+        ftrain,ftest = self.reshapeForCAM(ftrain),self.reshapeForCAM(ftest)
+        ytrain,ytest = self.reshapeForCAM(ytrain),self.reshapeForCAM(ytest)
+
+        batch_size, num_train = ftrain.size(0),ftrain.size(1)
+        chanNb = ftrain.size(2)
+        mapSize = ftrain.size(3)
+
+        num_test = ftest.size(1)
+        K = self.args.way
+        ytrain = ytrain.transpose(1, 2)
+
+        ftrain = ftrain.view(batch_size, num_train, -1) 
+
+        ftrain = torch.bmm(ytrain, ftrain)
+        ftrain = ftrain.div(ytrain.sum(dim=2, keepdim=True).expand_as(ftrain))
+        ftrain = ftrain.view(batch_size, -1, chanNb,mapSize,mapSize)
+
+        ftest = ftest.view(batch_size, num_test, chanNb,mapSize,mapSize)
+        ftrain, ftest,attMaps = self.cam(ftrain, ftest)
+
+        ftrain_no_average_pooling = ftrain
+        ftrain = ftrain.mean(4)
+        ftrain = ftrain.mean(4)
+
+        if not self.training:
+            return ftest,attMaps,self.test(ftrain, ftest)
+
+        ftest_norm = F.normalize(ftest, p=2, dim=3, eps=1e-12)
+        ftrain_norm = F.normalize(ftrain, p=2, dim=3, eps=1e-12)
+        ftrain_norm = ftrain_norm.unsqueeze(4)
+        ftrain_norm = ftrain_norm.unsqueeze(5)
+        cls_scores = self.scale_cls * torch.sum(ftest_norm * ftrain_norm, dim=3)
+        cls_scores = cls_scores.view(batch_size * num_test, *cls_scores.size()[2:])
+        cls_scores = cls_scores.mean(dim=-1).mean(dim=-1)
+
+        ftest = self.postProcessFeatureVolume(ftest,ytest,batch_size,num_test,self.args.way,mapSize)
+        #ftrain = self.postProcessFeatureVolume(ftrain_no_average_pooling,ytrain,batch_size,num_test,self.args.way,mapSize)
+
+        return ftest,attMaps,cls_scores
+
+    def postProcessFeatureVolume(self,ftrain,ytrain,batch_size,num_test,way,mapSize):
+        ftrain = ftrain.view(batch_size, num_test, way, -1)
+        ftrain = ftrain.transpose(2, 3) 
+        ytrain = ytrain.unsqueeze(3) 
+        ftrain = torch.matmul(ftrain, ytrain) 
+        ftrain = ftrain.view(batch_size * num_test, -1, mapSize, mapSize)
+        return ftrain
+
+    def cam(self, f1, f2):
+
+        b, n1, c, h, w = self.args.way,self.args.shot,f1.shape[2],f1.shape[3],f1.shape[4]
+        n2 = self.args.query
 
         f1 = f1.view(b, n1, c, -1) 
         f2 = f2.view(b, n2, c, -1)
@@ -131,21 +203,7 @@ class CAM(nn.Module):
         f2 = f2.unsqueeze(1) * a2.unsqueeze(3)
         f2 = f2.view(b, n1, n2, c, h, w)
 
-        attMaps = self.selectAttention(a2,a2_unormalized)
-
-        a2_unormalized = self.reshapeAttention(a2_unormalized)
-        #a2_unormalized.shape = 65 25 5 5
-        a2_unormalized_mean = a2_unormalized.mean(dim=-1).mean(dim=-1)
-        #65 25
-        a2_unormalized_mean = a2_unormalized_mean.view(a2_unormalized_mean.shape[0],self.args.way,self.args.shot)
-        #65 5 5
-        similarities_to_classes = a2_unormalized_mean.mean(dim=2)
-        #65 5 
-
-        f1 = f1.squeeze(0).mean(dim=1)
-        f2 = f2.squeeze(0).mean(dim=0)
-
-        return f1, f2,attMaps,similarities_to_classes
+        return f1.transpose(1, 2), f2.transpose(1, 2),a2
 
 def conv3x3(in_planes, out_planes, stride=1):
     """3x3 convolution with padding"""
@@ -393,8 +451,6 @@ class MetaModel(nn.Module):
             self.hyperprior_basestep_model = HyperpriorBasestep(args, self.update_step, self.update_lr, self.z_dim)
 
         if self.args.attention == "cross":
-            #self.conv1 = nn.Conv1d(25, 5, 1)
-            #self.conv2 = nn.Conv1d(5, 25, 1, stride=1, padding=0)
 
             self.cam = CAM(args)
 
@@ -425,12 +481,12 @@ class MetaModel(nn.Module):
         if self.mode == 'pre':
             self.fc = nn.Sequential(nn.Linear(self.z_dim, self.args.num_class))
 
-    def forward(self, inputs,retMaps=False):
+    def forward(self, inputs,retMaps=False,ytrain=None,ytest=None):
         if self.mode=='pre':
             return self.pretrain_forward(inputs)
         elif self.mode=='meta':
             data_shot, data_query = inputs
-            return self.meta_forward(data_shot, data_query,retMaps=retMaps)
+            return self.meta_forward(data_shot, data_query,retMaps=retMaps,ytrain=ytrain,ytest=ytest)
         else:
             raise ValueError('Please set the correct mode')
 
@@ -458,107 +514,7 @@ class MetaModel(nn.Module):
     def get_hyperprior_stepsize_mapping_vars(self):
         return self.hyperprior_basestep_model.get_hyperprior_mapping_vars()
 
-    '''
-    def cam(self, f1, f2):
-
-        f1 = f1.view(self.args.way*self.args.shot,f1.shape[1],f1.shape[2]*f1.shape[3])
-        f2 = f2.view(self.args.way*self.args.query,f2.shape[1],f2.shape[2]*f2.shape[3])
-        #f1 25 640 25
-        #f2 80 640 25
-
-        f1 = F.normalize(f1, p=2, dim=2, eps=1e-12)
-        f2 = F.normalize(f2, p=2, dim=2, eps=1e-12)
-
-        #testFeatureVolume(f1)
-
-        #print(f1.shape,norm.shape,norm.mean().item(),norm.max().item())
-
-        r = (f1.unsqueeze(0).unsqueeze(3)*f2.unsqueeze(1).unsqueeze(4)).sum(dim=2)
-
-        print(r.shape,f1.shape,f1.unsqueeze(0).unsqueeze(3).shape,f2.shape,f2.unsqueeze(1).unsqueeze(4).shape)
-        print((f1.unsqueeze(0).unsqueeze(3)*f2.unsqueeze(1).unsqueeze(4)).shape)
-
-        r = r.view(f2.shape[0]*f1.shape[0],r.shape[2],r.shape[3])
-    
-        ##############  attention for f1
-        #r 80*25 25 25
-        w_f1 = self.conv2(torch.relu(self.conv1(r.mean(dim=-1,keepdim=True))))
-        #w 80*25 25 1
-        w_f1 = w_f1.view(f2.shape[0],f1.shape[0],w_f1.shape[1],1)
-        #w 80 25 25 1
-
-        a_f1_spat = torch.softmax(w_f1,dim=2)
-        #w 80 25 25 1
-        a_f1_spat =  a_f1_spat.permute(0,1,3,2)
-        #w 80 25 1 25
-
-        f1_quer = f1.unsqueeze(0)*a_f1_spat
-        #f1_quer 80 25 640 25
-
-        a_f1_quer = torch.softmax(w_f1.mean(dim=2,keepdim=True),dim=0)
-        #w 80 25 1 1
-
-        f1 = (f1_quer*a_f1_quer).sum(dim=0)
-        #25 640 25
-    
-        ##############  attention for f1 
-        #r 80*25 25 25
-        r = r.permute(0,2,1)
-        w_f2 = self.conv2(torch.relu(self.conv1(r.mean(dim=-1,keepdim=True))))
-        #w 80*25 25 1
-        w_f2 = w_f2.view(f2.shape[0],f1.shape[0],w_f2.shape[1],1)
-        #w 80 25 25 1      
-
-        a_f2_spat = torch.softmax(w_f2,dim=2)
-        #w 80 25 25 1
-        a_f2_spat =  a_f2_spat.permute(0,1,3,2)
-        #w 80 25 1 25
-
-        f2_shot = f2.unsqueeze(1)*a_f2_spat
-        #f2_shot 80 25 640 25
-
-        a_f2_shot = torch.softmax(w_f2.mean(dim=2,keepdim=True),dim=1)
-        #w 80 25 1 1
-
-        w_f2_mean = w_f2.mean(dim=2,keepdim=True)
-        #w 80 25 1 1
-        w_f2_mean_resh = w_f2_mean.view(w_f2_mean.shape[0],self.args.way,self.args.shot)
-        #w 80 5 5
-        w_f2_classMean = w_f2_mean_resh.mean(dim=2)       
-
-        f2 = (f2_shot*a_f2_shot).sum(dim=1)
-        #80 640 25
-
-        attMaps = (a_f2_shot*a_f2_spat).sum(dim=1)
-
-        #Choosing the top nb_vec attention maps
-        _,top_inds = a_f2_shot.squeeze(-1).squeeze(-1).topk(self.args.nb_vec,dim=1)
-
-        attMaps = []
-        for i in range(len(top_inds)):
-            attMap = []
-            for j in range(self.args.nb_vec):
-                attMap.append(a_f2_spat[i][top_inds[i][j]].unsqueeze(0))
-            
-            attMap = torch.cat(attMap,dim=0)
-            attMaps.append(attMap.unsqueeze(0))
-        
-        attMaps = torch.cat(attMaps,dim=0)
-
-        #80 1 1 25
-        map_size = int(math.sqrt(attMaps.shape[-1]))
-        attMaps = attMaps.view(attMaps.shape[0],self.args.nb_vec,map_size,map_size)
-        #80 1 5 5
-
-        #testFeatureVolume(f1)
-
-        f1 = f1.view(f1.shape[0],f1.shape[1],map_size,map_size)
-        f2 = f2.view(f2.shape[0],f2.shape[1],map_size,map_size)
-           
-        return f1, f2,attMaps,w_f2_classMean
-    '''
-
-    def meta_forward(self, data_shot, data_query,retMaps=False):
+    def meta_forward(self, data_shot, data_query,retMaps=False,ytrain=None,ytest=None):
         data_query=data_query.squeeze(0)
         data_shot = data_shot.squeeze(0)
 
@@ -576,7 +532,8 @@ class MetaModel(nn.Module):
         embedding_query = self.normalize_feature(embedding_query)
 
         if self.args.attention == "cross":
-            embedding_shot,embedding_query,attMaps,similarities_to_classes = self.cam(embedding_shot,embedding_query)
+
+            embedding_query,attMaps,similarities_to_classes = self.cam(embedding_shot,embedding_query,ytrain=ytrain,ytest=ytest)
             emb_mean = embedding_shot.mean(dim=-1).mean(dim=-1)
 
             if retMaps:
@@ -676,17 +633,3 @@ class MetaModel(nn.Module):
             total_logits += logits_q
 
         return total_logits
-
-def testNorm(norm):
-    norm_permuted = norm.permute(2,1,0)
-    even_indexes = (torch.arange(norm_permuted.shape[0]) % 2 == 0)
-    odd_indexes = ~even_indexes
-    norm_even_permuted,norm_odd_permuted = norm_permuted[even_indexes],norm_permuted[odd_indexes]
-    norm_even, norm_odd = norm_even_permuted.permute(2,1,0),norm_odd_permuted.permute(2,1,0)
-    print(norm_even.shape,norm_odd.shape,norm_even.mean().item(),norm_even.max().item(),norm_odd.mean().item(),norm_odd.max().item())
-
-def testFeatureVolume(f1):
-    norm = torch.sqrt(torch.pow(f1,2).sum(dim=1,keepdim=True))
-    if len(norm.shape) > 3:
-        norm = norm.view(norm.shape[0],norm.shape[1],-1)
-    testNorm(norm)

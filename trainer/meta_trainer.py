@@ -305,7 +305,8 @@ class MetaTrainer(object):
         else:
             label_shot = label_shot.type(torch.LongTensor)
 
-        SLEEP(args)
+        label_shot = label_shot.to("cuda") if torch.cuda.is_available() else label_shot 
+        label = label.to("cuda") if torch.cuda.is_available() else label
 
         for epoch in range(1, args.max_epoch + 1):
             start_time=time.time()
@@ -327,7 +328,7 @@ class MetaTrainer(object):
                 data_shot = data_shot.unsqueeze(0).repeat(args.num_gpu, 1, 1, 1, 1)
                 
                 if args.attention == "cross" and args.cross_att_loss:
-                    logits,att_weights = self.model((data_shot, data_query))
+                    logits,att_weights = self.model((data_shot, data_query),ytrain=label_shot,ytest=label)
                     loss1 = F.cross_entropy(logits, label)
                     loss2 = F.cross_entropy(att_weights, label)
                     loss = loss1 + args.cross_att_loss_weight * loss2
@@ -640,7 +641,6 @@ class MetaTrainer(object):
         else:
             label = label.type(torch.LongTensor)
 
-        SLEEP(args)
         for epoch in range(1, args.max_epoch + 1):
             print (args.save_path)
 
