@@ -27,10 +27,6 @@ def save_list_to_txt(name,input_list):
         f.write(item+'\n')
     f.close()
 
-def SLEEP(args):
-    print('Rest for %.3f hour:' % (args.sleep))
-    time.sleep(args.sleep*60*60)
-
 def ensure_path(path):
     if os.path.exists(path):
         pass
