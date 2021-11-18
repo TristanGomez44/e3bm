@@ -80,6 +80,9 @@ case $1 in
  "crossAtt_opt_loss_more_complFunc")
     python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_train -dataset tieredimagenet -gpu 2 -attention cross -optuna       -exp_id tieredimagenet -model_id nodist_cross_loss_complfunc -max_epoch 50 -val_episode 500  -num_workers 4 -seed 1 -cross_att_loss -optuna_trial_nb 40 -opt_loss -more_params
     ;;
+ "crossAtt_opt_loss_more_simpler")
+    python main.py -backbone resnet12 -shot 5 -way 5 -mode meta_train -dataset tieredimagenet -gpu 2 -attention cross -optuna       -exp_id tieredimagenet -model_id nodist_cross_loss_simpler -max_epoch 50 -val_episode 500  -num_workers 4 -seed 1 -cross_att_loss -optuna_trial_nb 40 -opt_loss -more_params -query 11
+    ;;
   "*")
     echo "no such model"
     ;;
