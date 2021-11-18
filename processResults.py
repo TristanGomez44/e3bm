@@ -1,6 +1,7 @@
 import glob
 import numpy as np
 import torch
+import math
 import matplotlib.pyplot as plt
 plt.switch_backend('agg')
 import torchvision
@@ -41,6 +42,21 @@ def loadAttNormImgs(exp_id,model_id,test_on_val=False):
     suff = "val" if test_on_val else "test"
 
     attMaps = np.load("results/{}/attMaps_{}_{}.npy".format(exp_id,model_id,suff),mmap_mode="r")
+
+    if model_id.find("cross") != -1:
+        #attMaps = attMaps[:,0:1]
+
+        #3000 25 65 25
+        attMaps = attMaps.transpose(0,2,1,3)
+        #3000 65 25 25
+        attMaps = attMaps.reshape(attMaps.shape[0]*attMaps.shape[1],attMaps.shape[2],attMaps.shape[3])
+        #3000*65 25 25
+        mapSize = int(math.sqrt(attMaps.shape[2]))
+        attMaps = attMaps.reshape(attMaps.shape[0],attMaps.shape[1],mapSize,mapSize)
+        #3000*65 25 5 5
+        attMaps = attMaps.mean(axis=1,keepdims=True)
+        #3000*65 1 5 5
+
     attMaps = normMap(attMaps)
 
     print("results/{}/attMaps_{}_{}.npy".format(exp_id,model_id,suff),attMaps.shape)
@@ -53,7 +69,6 @@ def loadAttNormImgs(exp_id,model_id,test_on_val=False):
     attMaps = attMaps*norms
 
     return attMaps,norms,imgs
-
 
 def mixAndCat(catImg,map,img):
     mix = 0.8*map+0.2*img.mean(dim=1,keepdims=True)
@@ -125,7 +140,7 @@ def visMaps(exp_id,model_id,viz_id,vizOrder,cross_id,bcnn_id,nrows,img_to_plot,p
                 raise ValueError("Can't find {} in vizDic of {}".format(i,viz_id))
 
         catImg = preproc_and_cat(attMaps_bcnn,i,catImg,img,smooth=True)
-        catImg = preproc_and_cat(attMaps_cross,i,catImg,img,smooth=True)
+        catImg = preproc_and_cat(attMaps_cross,i,catImg,img,smooth=True,cm=cmPlasma)
         catImg = preproc_and_cat(attMaps,i,catImg,img,smooth=True)
 
         if i % 80 == 79:
@@ -139,8 +154,12 @@ def visMaps(exp_id,model_id,viz_id,vizOrder,cross_id,bcnn_id,nrows,img_to_plot,p
         torchvision.utils.save_image(catImg,outPath,nrow=nrows)
         os.system("convert -resize 20% {} {}".format(outPath,outPath.replace(".png","_small.png")))
 
-def preproc_and_cat(attMaps,i,catImg,img,smooth=False):
+def preproc_and_cat(attMaps,i,catImg,img,smooth=False,cm=None):
     attMap = torch.tensor(attMaps[i:i+1])
+
+    if not cm is None:
+       attMap = applyCMap(attMap,cm) 
+
     attMap = (attMap-attMap.min())/(attMap.max()-attMap.min())
     attMap = reshape(attMap,smooth=smooth)
     catImg = mixAndCat(catImg,attMap,img)
@@ -172,7 +191,7 @@ if __name__ == "__main__":
     parser.add_argument('--exp_id',type=str,default="tieredimagenet")
     parser.add_argument('--viz_id',type=str,default="baseline")
     parser.add_argument('--model_id',type=str,default="dist")
-    parser.add_argument('--cross_id',type=str,default="nodist_cross_loss")
+    parser.add_argument('--cross_id',type=str,default="nodist_cross_loss_origfunc")
     parser.add_argument('--bcnn_id',type=str,default="nodist_bcnn")
     parser.add_argument('--nrows',type=int,default=12)
     parser.add_argument('--plot_id',type=str,default="")
